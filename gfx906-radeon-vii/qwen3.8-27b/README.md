@@ -15,11 +15,17 @@ full attention という混合構成。MTP ヘッドつき。
 ```bash
 GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 \
   llama-server -m models/Qwen3.8-27B-UD-Q4_K_S.gguf \
-    -ngl 99 -c 24576 --parallel 2 --jinja
+    -ngl 99 -c 32768 --parallel 2 -ctk q8_0 -ctv q8_0 --jinja
 ```
 
 **`GGML_VK_DISABLE_*` はこれ以外を設定しないこと。** `--jinja` は tool calling に必要。
-`-c` は 27k が VRAM 上限。長文プロンプト中心なら `Q3_K_L` (14.12GB) で prefill 208.7。
+
+`-c 24576` を f16 KV で通すと VRAM 余裕が 28 MB しか残らない。**KV を q8_0 に
+すればコンテキストを 33% 増やしてなお余裕が 17 倍**になり、速度は同じ
+(詳細は [docs/serving.md](docs/serving.md))。長文プロンプト中心なら
+`Q3_K_L` (14.12GB) で prefill 208.7。
+
+OpenAI 互換 API として常駐させる手順は [docs/serving.md](docs/serving.md)。
 
 ## 量子化の選び方
 
@@ -56,6 +62,7 @@ GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 \
 | [docs/rejected.md](docs/rejected.md) | 棄却した 17 件と理由 |
 | [docs/benchmarks.md](docs/benchmarks.md) | 品質・下流タスク・エージェント評価 |
 | [docs/predictions.md](docs/predictions.md) | 予測と結果の答え合わせ |
+| [docs/serving.md](docs/serving.md) | OpenAI 互換 API として常駐させる |
 
 未解決は 1 件 — `q8_0 m=48 k=5120` の matvec が実効 16 GB/s (matvec 時間の 5.1%)。
 m=48 では 60 CU を埋められず、split-K が要る。期待 +3〜4%。

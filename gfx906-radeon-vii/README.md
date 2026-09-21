@@ -38,7 +38,7 @@ coopmat 非対応 / subgroup min = max = 64 / ROCm 5.7 で打ち切り
 
 | モデル | decode | prefill | 備考 |
 |---|---|---|---|
-| [Qwen3.8-27B](qwen3.8-27b/) | 26.26 t/s | 173.19 t/s | 混合線形アテンション (65層中49層) |
+| [Qwen3.8-27B](qwen3.8-27b/) | 26.26 t/s | 173.19 t/s | 混合線形アテンション。[API 常駐構成](qwen3.8-27b/docs/serving.md)あり |
 | [Qwen3-8B](qwen3-8b/) | — | — | 比較用。通常の Transformer |
 
 ## ツール
