@@ -1,75 +1,65 @@
-# dirOllamaSetting — Radeon VII (gfx906) 推論最適化
+# Radeon VII (gfx906) で LLM 推論を速くする
 
-Qwen3.8-27B を AMD Radeon VII (Vega 20 / gfx906、行列演算ユニット非搭載) で
-高速に動かすための計測・最適化一式。
+行列演算ユニットを持たない AMD Radeon VII (Vega 20 / gfx906) で Qwen3.8-27B を
+動かすための計測・最適化一式。**コード変更 7 行で decode が 2 倍**になった。
 
-**完全な最適化台帳は [OPTIMIZATION.md](OPTIMIZATION.md)。**
-採用した施策、棄却した施策とその理由、測定手法の落とし穴、未解決項目を記録している。
+| | 当初 | 最終 | |
+|---|---|---|---|
+| decode | 13.27 t/s | **26.26 t/s** | +98% |
+| prefill | 98.96 t/s | **173.19 t/s** | +75% |
 
-## 現在の最良構成
+## 使い方
 
 ```bash
 GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 \
-  ./work/llama.cpp/build/bin/llama-server \
-    -m models27b/Qwen3.8-27B-UD-Q4_K_S.gguf -ngl 99
+  llama-server -m Qwen3.8-27B-UD-Q4_K_S.gguf \
+    -ngl 99 -c 24576 --parallel 2 --jinja
 ```
 
-| | 当初 | 現在 |
-|---|---|---|
-| decode | 13.27 t/s | **26.26 t/s** (+98%) |
-| prefill | 98.96 t/s | **173.19 t/s** (+75%) |
+**`GGML_VK_DISABLE_*` はこれ以外を設定しないこと。** 特に
+`DISABLE_INTEGER_DOT_PRODUCT` と `DISABLE_MMVQ` は大きく性能を落とす。
 
-`GGML_VK_DISABLE_*` はこれ以外設定しないこと。特に `DISABLE_INTEGER_DOT_PRODUCT`
-と `DISABLE_MMVQ` は大きな性能低下を招く (OPTIMIZATION.md の A-02 / A-03)。
+長文プロンプト中心なら `Q3_K_L` (14.12GB) で prefill 208.7 t/s。
 
-## ビルド
+## 効いたこと / 効かなかったこと
 
-```bash
-sudo apt-get install -y build-essential cmake git libvulkan-dev glslc \
-                        glslang-tools spirv-headers libcurl4-openssl-dev
-cd work/llama.cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_NATIVE=ON -DLLAMA_BUILD_TESTS=ON
-cmake --build build -j$(nproc)
-```
+効いたのは 6 件だけ。Ollama をやめる (+74%)、環境変数の誤設定を外す
+(prefill +30%)、VRAM に収まる最大の量子化を選ぶ、`DISABLE_HOST_VISIBLE_VIDMEM`
+(+20%)、そして f16 累算を f32 に変える 7 行のパッチ (prefill +30%)。
 
-llama.cpp は upstream `3cf0325` + ローカルパッチ `f48049e`
-(GCN で quant matmul の累算を f32 にする、7行)。
+棄却は 17 件。クロック固定、提出粒度、投機デコード、AMDVLK、カーネルの
+occupancy 改善 — すべて実測で効果なしまたは逆効果だった。
 
-## ファイル構成
+→ [docs/findings.md](docs/findings.md) / [docs/rejected.md](docs/rejected.md)
+
+## 注意
+
+**`llama-bench` の token-generation 値と `test-backend-ops` の GFLOPS は
+このハードウェアで信用できない。** 前者は実生成と 2.8 倍乖離し、後者は
+23 型中 15 型が PCIe 転送律速で GPU を測っていない。
+
+→ [docs/measurement.md](docs/measurement.md)
+
+## 構成
 
 | パス | 内容 |
 |---|---|
-| `OPTIMIZATION.md` | **最適化台帳**。採用/棄却の全項目と根拠 |
-| `stage0_predictions.md` | Stage 0 の事前予測 (実行前に記録したもの) |
-| `gpuclk.sh` | GPU クロック/DPM 制御と実測表示 |
-| `run_bench.py` | 計測基盤。クロックを同時サンプリングする |
-| `bench_stages.py` | 段階マトリクス (クロック / env / 量子化 x env / op別) |
-| `bench_greedy.py` | 貪欲探索 (提出粒度 / CLI グリッド / opプロファイル / 投機デコード) |
-| `stage0_sweep.sh` | env スイープ。対照挟み込みと GPU 使用検証つき |
-| `quality_eval.sh` | 量子化形式ごとの perplexity |
-| `fetch_models.sh` / `fetch_models_27b.sh` | GGUF 取得 |
-| `results/` | 8B の測定結果 (CSV / op プロファイル) |
-| `results27b/` | 27B の測定結果 |
-| `models/` `models27b/` | GGUF (git 管理外) |
-| `work/llama.cpp/` | ビルド済み llama.cpp (git 管理外) |
+| [docs/setup.md](docs/setup.md) | ビルドとモデル取得 |
+| [docs/findings.md](docs/findings.md) | 採用した 6 件 |
+| [docs/rejected.md](docs/rejected.md) | 棄却した 17 件 |
+| [docs/architecture.md](docs/architecture.md) | ハードウェア特性と律速要因 |
+| [docs/measurement.md](docs/measurement.md) | 測定の落とし穴と規約 |
+| [docs/benchmarks.md](docs/benchmarks.md) | 品質・下流タスク・エージェント評価 |
+| [AGENTS.md](AGENTS.md) | Agent 向け作業規約 (英語) |
+| `*.py` `*.sh` | 計測スクリプト |
+| `results/` `results27b/` | 全測定結果 (CSV) |
 
-## 測定するときの必須事項
+モデル (100GB) は追跡外。`fetch_models*.sh` で再取得する。
 
-1. **GPU ジョブは常に1つ。** 同時実行すると VRAM 枯渇 → GPU リセット → DRM 権限喪失 →
-   無言で CPU 実行に落ちる
-2. **`no usable GPU` を毎回検査する。** CPU フォールバックは警告だけで進行する
-3. **対照構成を 3 run ごとに挟む。** 連続稼働で VRAM が断片化し decode が 40% 落ちる
-4. **`llama-bench` の tg 値と `test-backend-ops` の GFLOPS は使わない。**
-   それぞれ 2.8 倍の乖離、PCIe 律速という問題がある
+## パッチ
 
-詳細は OPTIMIZATION.md の 5 章・6 章。
+llama.cpp `3cf0325` に対する 1 件。GCN には行列コアが無く、コンパイラが
+スカラ `float16_t` の累算器をペアに詰めないため、f16 累算は変換コストだけを
+生む。`ggml_vk_get_mul_mat_mat_f16acc()` を GCN で false にする。
 
-## 復旧手順
-
-GPU が見えなくなったとき (`ggml_vulkan: No devices found`):
-
-```bash
-sudo setfacl -m u:$USER:rw /dev/dri/renderD128 /dev/dri/card1
-sudo usermod -aG render,video $USER
-vulkaninfo --summary | grep deviceName   # 復帰確認
-```
+I-quant テンソルのみ -28.6%、K-quant は +0.9% (MMQ 経路は元から f16acc 非対象)。

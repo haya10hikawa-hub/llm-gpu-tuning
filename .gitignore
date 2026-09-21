@@ -1,11 +1,11 @@
-# GGUF は巨大なので管理外 (fetch_models*.sh で再取得できる)
+# GGUF files are huge; fetch_models*.sh re-downloads them
 models/
 models27b/
 ollama_models/
 ollama_test/
 corpus/
 amdvlk/
-# llama.cpp は upstream + パッチで再現する (work/llama.cpp は独自の git 管理下)
+# llama.cpp is reproduced from upstream + docs/patches (own git tree)
 work/
 __pycache__/
 *.pyc

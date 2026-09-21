@@ -242,16 +242,17 @@ def main():
     print()
     for c in sorted(cat):
         t = sum(x[0] for x in cat[c]); a = sum(x[1] for x in cat[c]); n = len(cat[c])
-        name = {"A": "A 単純な選択", "B": "B 曖昧な選択", "C": "C 引数抽出", "D": "D 呼ばない判断"}[c]
-        print(f"{name:16s} tool {t}/{n} ({100*t/n:5.1f}%)   args {a}/{n} ({100*a/n:5.1f}%)")
+        name = {"A": "A unambiguous", "B": "B disambiguation", "C": "C argument extraction",
+                "D": "D restraint"}[c]
+        print(f"{name:22s} tool {t}/{n} ({100*t/n:5.1f}%)   args {a}/{n} ({100*a/n:5.1f}%)")
     tt = sum(r["tool_ok"] for r in rows); aa = sum(r["args_ok"] for r in rows)
     n = len(rows)
     secs = [r["sec"] for r in rows if r["sec"] > 0]
-    print(f"{'合計':16s} tool {tt}/{n} ({100*tt/n:5.1f}%)   args {aa}/{n} ({100*aa/n:5.1f}%)")
+    print(f"{"total":22s} tool {tt}/{n} ({100*tt/n:5.1f}%)   args {aa}/{n} ({100*aa/n:5.1f}%)")
     if secs:
-        print(f"\n1ターン平均 {sum(secs)/len(secs):.1f}s  最大 {max(secs):.1f}s  "
-              f"生成トークン平均 {sum(r['total_tok'] for r in rows)/n:.0f}  "
-              f"うち thinking 平均 {sum(r['think_tok'] for r in rows)/n:.0f}")
+        print(f"\nper turn mean {sum(secs)/len(secs):.1f}s  max {max(secs):.1f}s  "
+              f"completion tokens mean {sum(r['total_tok'] for r in rows)/n:.0f}  "
+              f"of which thinking {sum(r['think_tok'] for r in rows)/n:.0f}")
 
     import csv as _csv
     with open(args.out, "w", newline="") as f:

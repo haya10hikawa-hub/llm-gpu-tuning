@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 持続負荷試験: llama-server を常駐させ、連続リクエストを投げながら
-# クロック/温度/電力/VRAM を追跡する。熱スロットリング・断片化・安定性を同時に見る。
+# Sustained load test: keep llama-server resident, hammer it with requests and
+# track clocks / temperature / power / VRAM. Covers thermal throttling,
+# allocator drift and stability in one run.
 set -u
 ROOT=/home/ubuntu/Desktop/dirOllamaSetting
 B=$ROOT/work/llama.cpp/build/bin
@@ -8,7 +9,7 @@ M=$ROOT/models27b/Qwen3.8-27B-UD-Q4_K_S.gguf
 C=/sys/class/drm/card1/device
 OUT=$ROOT/results27b/sustained.csv
 LOG=/tmp/claude-1000/-home-ubuntu-Desktop-dirOllamaSetting/60c74b66-1de7-445b-8ab5-15348a1f5583/scratchpad
-DURATION=${1:-1500}   # 秒
+DURATION=${1:-1500}   # seconds
 PORT=11436
 
 $ROOT/gpuclk.sh high >/dev/null 2>&1
@@ -17,7 +18,7 @@ hw(){ ls $C/hwmon/hwmon*/$1 2>/dev/null | head -1; }
 GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 nohup $B/llama-server -m $M -ngl 99 -c 8192 \
   --host 127.0.0.1 --port $PORT --parallel 1 > $LOG/srv.log 2>&1 &
 SRV=$!
-echo "server pid=$SRV, ロード待ち..."
+echo "server pid=$SRV, waiting for load..."
 for i in $(seq 1 120); do
   curl -s -m 2 http://127.0.0.1:$PORT/health >/dev/null 2>&1 && break; sleep 3
 done

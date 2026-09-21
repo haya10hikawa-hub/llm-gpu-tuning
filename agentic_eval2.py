@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agentic evaluation, round 2 — the failure modes round 1 could not reach.
+Agentic evaluation, round 2 - the failure modes round 1 could not reach.
 
 Round 1 scored 24/24, which only means single-turn tool selection is easy for
 a 27B model. This round targets where agents actually break:
@@ -121,8 +121,8 @@ def run(server):
             sub(c2[0][1], {"to": "tanaka@lab.example.jp"})
         note = "" if step2_ok else f"step2={c2[0][0] if c2 else 'none'} {json.dumps(c2[0][1])[:40] if c2 else ''}"
     else:
-        step2_ok, s2, u2, note = False, 0, {}, "step1 で呼ばなかった"
-    rec("E", "E1 連絡先検索->メール送信", step1_ok and step2_ok,
+        step2_ok, s2, u2, note = False, 0, {}, "no call in step 1"
+    rec("E", "E1 lookup contact -> send email", step1_ok and step2_ok,
         note if note else "", s1 + s2, u1.get("completion_tokens", 0) + u2.get("completion_tokens", 0))
 
     # E2: use the returned rate to decide, then convert
@@ -141,8 +141,8 @@ def run(server):
             sub(c2[0][1], {"amount": 500, "from_currency": "usd", "to_currency": "jpy"})
         note = "" if ok2 else f"step2={c2[0][0] if c2 else 'none'}"
     else:
-        ok2, s2, u2, note = False, 0, {}, "step1 で呼ばなかった"
-    rec("E", "E2 レート確認->条件分岐->変換", ok1 and ok2, note, s1 + s2,
+        ok2, s2, u2, note = False, 0, {}, "no call in step 1"
+    rec("E", "E2 check rate -> branch -> convert", ok1 and ok2, note, s1 + s2,
         u1.get("completion_tokens", 0) + u2.get("completion_tokens", 0))
 
     # E3: negative branch - rate below threshold, must NOT convert
@@ -156,10 +156,10 @@ def run(server):
             {"role": "tool", "tool_call_id": c[0][2], "content": json.dumps({"rate": 1.08})}]
         m2, c2, t2, s2, u2 = call(server, msgs)
         ok = not c2   # must stop, not convert
-        note = "" if ok else f"条件を満たさないのに {c2[0][0]} を呼んだ"
+        note = "" if ok else f"called {c2[0][0]} although condition was false"
     else:
-        ok, s2, u2, note = False, 0, {}, "step1 で呼ばなかった"
-    rec("E", "E3 条件不成立->呼ばない", ok, note, s1 + s2,
+        ok, s2, u2, note = False, 0, {}, "no call in step 1"
+    rec("E", "E3 condition false -> do not call", ok, note, s1 + s2,
         u1.get("completion_tokens", 0) + u2.get("completion_tokens", 0))
 
     # ---------- F: parallel / multiple calls ----------
@@ -168,48 +168,48 @@ def run(server):
     names = [x[0] for x in c]
     locs = " ".join(json.dumps(x[1]).lower() for x in c)
     ok = names.count("get_weather") >= 2 or ("tokyo" in locs and "london" in locs)
-    rec("F", "F1 2都市の天気", ok, f"calls={len(c)} {names}", s, u.get("completion_tokens", 0))
+    rec("F", "F1 weather for two cities", ok, f"calls={len(c)} {names}", s, u.get("completion_tokens", 0))
 
     m, c, txt, s, u = call(server, [{"role": "user", "content":
         "What time zone is Cairo in, and what is the weather there?"}])
     names = [x[0] for x in c]
     ok = "get_timezone" in names and "get_weather" in names
-    rec("F", "F2 タイムゾーン+天気", ok, f"calls={len(c)} {names}", s, u.get("completion_tokens", 0))
+    rec("F", "F2 timezone + weather", ok, f"calls={len(c)} {names}", s, u.get("completion_tokens", 0))
 
     # ---------- G: underspecification -> must ask, not invent ----------
     for name, prompt, tool, badkeys in [
-        ("G1 宛先不明のメール", "Send an email saying the build passed.", "send_email", ["to"]),
-        ("G2 日付不明の予定", "Put a team sync on the calendar at 10am.", "create_calendar_event", ["date"]),
-        ("G3 通貨不明の変換", "Convert 300 into yen for me.", "convert_currency", ["from_currency"]),
+        ("G1 email with no recipient", "Send an email saying the build passed.", "send_email", ["to"]),
+        ("G2 event with no date", "Put a team sync on the calendar at 10am.", "create_calendar_event", ["date"]),
+        ("G3 conversion with no source currency", "Convert 300 into yen for me.", "convert_currency", ["from_currency"]),
     ]:
         m, c, txt, s, u = call(server, [{"role": "user", "content": prompt}])
         if not c:
-            ok, note = True, "聞き返した(ツール呼び出しなし)"
+            ok, note = True, "asked back (no tool call)"
         else:
             got = c[0][1]
             invented = [k for k in badkeys if k in got and got[k] not in (None, "", "unknown")]
             ok = not invented
-            note = f"捏造: {', '.join(f'{k}={got[k]}' for k in invented)}" if invented else "必須引数を省いた"
+            note = f"invented: {', '.join(f'{k}={got[k]}' for k in invented)}" if invented else "omitted the required argument"
         rec("G", name, ok, note, s, u.get("completion_tokens", 0))
 
     # ---------- H: distractors ----------
     m, c, txt, s, u = call(server, [{"role": "user", "content":
         "I paid 45 dollars for lunch yesterday and 12 for coffee. Anyway, convert 900 USD to EUR."}])
     ok = bool(c) and c[0][0] == "convert_currency" and sub(c[0][1], {"amount": 900})
-    rec("H", "H1 余計な金額の混入", ok,
+    rec("H", "H1 distractor amounts", ok,
         f"amount={c[0][1].get('amount') if c else 'none'}", s, u.get("completion_tokens", 0))
 
     m, c, txt, s, u = call(server, [{"role": "user", "content":
         "Last year on 2025-04-01 we had an outage. Schedule a postmortem called Outage Review "
         "for 2026-11-20 at 16:00."}])
     ok = bool(c) and c[0][0] == "create_calendar_event" and sub(c[0][1], {"date": "2026-11-20"})
-    rec("H", "H2 過去日付の混入", ok,
+    rec("H", "H2 distractor past date", ok,
         f"date={c[0][1].get('date') if c else 'none'}", s, u.get("completion_tokens", 0))
 
     m, c, txt, s, u = call(server, [{"role": "user", "content":
         "My colleague's ticker is TSLA but I want the price of NVDA."}])
     ok = bool(c) and c[0][0] == "get_stock_price" and sub(c[0][1], {"symbol": "nvda"})
-    rec("H", "H3 別ティッカーの混入", ok,
+    rec("H", "H3 distractor ticker", ok,
         f"symbol={c[0][1].get('symbol') if c else 'none'}", s, u.get("completion_tokens", 0))
 
     # ---------- I: error recovery ----------
@@ -224,13 +224,13 @@ def run(server):
         m2, c2, t2, s2, u2 = call(server, msgs)
         # good behaviour: list the directory, or report the failure. bad: silently invent contents.
         listed = bool(c2) and c2[0][0] == "list_directory"
-        reported = (not c2) and re.search(r"not (found|exist)|no such|error|見つか", t2, re.I) is not None
+        reported = (not c2) and re.search(r"not (found|exist)|no such|error", t2, re.I) is not None
         ok = listed or reported
-        note = "ディレクトリ一覧で回復" if listed else ("失敗を報告" if reported else
-               f"不適切: {c2[0][0] if c2 else t2[:40]}")
+        note = "recovered via list_directory" if listed else ("reported the failure" if reported else
+               f"inappropriate: {c2[0][0] if c2 else t2[:40]}")
     else:
-        ok, s2, u2, note = False, 0, {}, "step1 で呼ばなかった"
-    rec("I", "I1 ファイル不在からの回復", ok, note, s1 + s2,
+        ok, s2, u2, note = False, 0, {}, "no call in step 1"
+    rec("I", "I1 recover from missing file", ok, note, s1 + s2,
         u1.get("completion_tokens", 0) + u2.get("completion_tokens", 0))
 
     return R
@@ -244,16 +244,16 @@ def main():
     print(f"{'cat':3s} {'task':34s} {'ok':3s} {'sec':>7s}  note")
     R = run(a.server)
     print()
-    names = {"E": "E 複数ターン連鎖", "F": "F 並列呼び出し", "G": "G 情報不足で聞き返す",
-             "H": "H 注意逸らし耐性", "I": "I エラー回復"}
+    names = {"E": "E multi-turn chain", "F": "F parallel calls", "G": "G ask when underspecified",
+             "H": "H distractor resistance", "I": "I error recovery"}
     for c in sorted({r["cat"] for r in R}):
         rs = [r for r in R if r["cat"] == c]
         k = sum(r["ok"] for r in rs)
-        print(f"{names[c]:22s} {k}/{len(rs)} ({100*k/len(rs):5.1f}%)")
+        print(f"{names[c]:26s} {k}/{len(rs)} ({100*k/len(rs):5.1f}%)")
     k = sum(r["ok"] for r in R)
-    print(f"{'合計':22s} {k}/{len(R)} ({100*k/len(R):5.1f}%)")
-    print(f"\n1タスク平均 {sum(r['sec'] for r in R)/len(R):.1f}s  "
-          f"生成トークン平均 {sum(r['tok'] for r in R)/len(R):.0f}")
+    print(f"{'total':26s} {k}/{len(R)} ({100*k/len(R):5.1f}%)")
+    print(f"\nper task mean {sum(r['sec'] for r in R)/len(R):.1f}s  "
+          f"completion tokens mean {sum(r['tok'] for r in R)/len(R):.0f}")
     import csv
     with open(a.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(R[0].keys())); w.writeheader(); w.writerows(R)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 文脈長スケーリング: 深さを変えて decode/prefill を測る。
-# 65層中 49層が線形アテンション (状態固定) なので、通常の Transformer より
-# 劣化が緩やかなはず、という仮説の検証。
+# Context length scaling: measure decode/prefill at increasing depth.
+# 49 of 65 layers are linear attention with a fixed-size state, so degradation
+# should be gentler than a plain transformer. This checks that.
 set -u
 ROOT=/home/ubuntu/Desktop/dirOllamaSetting
 B=$ROOT/work/llama.cpp/build/bin

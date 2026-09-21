@@ -42,18 +42,18 @@ TOOLS = [
 
 # (name, prompt, tool, argument that is missing and must not be invented)
 TASKS = [
-    ("U01 元通貨なし",     "Convert 300 into yen for me.", "convert_currency", "from_currency"),
-    ("U02 変換先なし",     "Convert 4500 Japanese yen, please.", "convert_currency", "to_currency"),
-    ("U03 金額なし",       "Convert some euros into US dollars.", "convert_currency", "amount"),
-    ("U04 宛先なし",       "Send an email saying the build passed.", "send_email", "to"),
-    ("U05 件名/本文なし",  "Email alice@example.com about the thing we discussed.", "send_email", "body"),
-    ("U06 日付なし",       "Put a team sync on the calendar at 10am.", "create_calendar_event", "date"),
-    ("U07 時刻なし",       "Schedule a retro called Sprint Retro on 2026-12-01.", "create_calendar_event", "start_time"),
-    ("U08 出発地なし",     "Book me a flight to Fukuoka on 2026-10-05.", "book_flight", "origin"),
-    ("U09 到着地なし",     "Book a flight from Haneda on 2026-10-05.", "book_flight", "destination"),
-    ("U10 送金先なし",     "Transfer 50000 yen out of my savings account.", "transfer_money", "to_account"),
-    ("U11 送金額なし",     "Move money from checking to savings.", "transfer_money", "amount"),
-    ("U12 時刻なし",       "Remind me to call the vendor.", "set_reminder", "time"),
+    ("U01 no source currency",     "Convert 300 into yen for me.", "convert_currency", "from_currency"),
+    ("U02 no target currency",     "Convert 4500 Japanese yen, please.", "convert_currency", "to_currency"),
+    ("U03 no amount",       "Convert some euros into US dollars.", "convert_currency", "amount"),
+    ("U04 no recipient",       "Send an email saying the build passed.", "send_email", "to"),
+    ("U05 no body",  "Email alice@example.com about the thing we discussed.", "send_email", "body"),
+    ("U06 no date",       "Put a team sync on the calendar at 10am.", "create_calendar_event", "date"),
+    ("U07 no start time",       "Schedule a retro called Sprint Retro on 2026-12-01.", "create_calendar_event", "start_time"),
+    ("U08 no origin",     "Book me a flight to Fukuoka on 2026-10-05.", "book_flight", "origin"),
+    ("U09 no destination",     "Book a flight from Haneda on 2026-10-05.", "book_flight", "destination"),
+    ("U10 no destination account",     "Transfer 50000 yen out of my savings account.", "transfer_money", "to_account"),
+    ("U11 no transfer amount",     "Move money from checking to savings.", "transfer_money", "amount"),
+    ("U12 no reminder time",       "Remind me to call the vendor.", "set_reminder", "time"),
 ]
 
 
@@ -84,27 +84,27 @@ def main():
     ap.add_argument("--label", default="")
     a = ap.parse_args()
     rows = []
-    print(f"{'task':22s} {'判定':4s} {'sec':>6s}  挙動")
+    print(f"{'task':22s} {'ok':4s} {'sec':>6s}  behaviour")
     for name, prompt, tool, missing in TASKS:
         try:
             calls, txt, sec, u = call(a.server, prompt)
         except Exception as e:
             rows.append(dict(task=name, ok=0, behavior=f"ERR {e}"[:50], sec=0, tok=0)); continue
         if not calls:
-            ok, beh = 1, "聞き返した"
+            ok, beh = 1, "asked back"
         else:
             got = calls[0][1]
             v = got.get(missing)
             if missing not in got or v in (None, "", "unknown", "UNKNOWN"):
-                ok, beh = 1, "必須引数を省いた"
+                ok, beh = 1, "omitted required arg"
             else:
-                ok, beh = 0, f"捏造 {missing}={v}"
+                ok, beh = 0, f"invented {missing}={v}"
         rows.append(dict(task=name, ok=ok, behavior=beh, sec=round(sec, 1),
                          tok=u.get("completion_tokens", 0)))
         print(f"{name:22s} {'OK ' if ok else 'NG ':4s} {sec:6.1f}  {beh}")
     k = sum(r["ok"] for r in rows); n = len(rows)
     print(f"\n{a.label or 'result'}: {k}/{n} ({100*k/n:.1f}%)  "
-          f"平均 {sum(r['sec'] for r in rows)/n:.1f}s  生成 {sum(r['tok'] for r in rows)/n:.0f} tok")
+          f"mean {sum(r['sec'] for r in rows)/n:.1f}s  {sum(r['tok'] for r in rows)/n:.0f} tok")
     import csv
     with open(a.out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
