@@ -1,0 +1,47 @@
+# Backend registry. No secrets here -- this file is tracked.
+# Keys are named by key_env and resolved from /etc/agentctl.env at load time.
+# "enabled = false" means the seam exists but the backend is never routed to.
+
+[local]
+enabled  = true
+api      = "openai"                      # llama-server OpenAI-compatible surface
+base_url = "http://127.0.0.1:8080"
+model    = "qwen3.8-27b"                 # --alias on the server
+key_env  = "LLAMA_API_KEY"
+slots        = 2                         # MEASURED from GET /props total_slots
+ctx_per_slot = 16384                     # MEASURED: n_ctx_slot under -c 32768 --parallel 2.
+                                         # Tracks the launch flags -- re-read /props if they change.
+privacy  = "on_device"                   # the only backend a privacy=strict request may use
+
+[opus]
+enabled  = true
+api      = "anthropic"                   # Messages API
+base_url = "https://api.anthropic.com"
+model    = "claude-opus-5"
+key_env  = "ANTHROPIC_API_KEY"
+role     = "reasoning"                   # local emits 0 thinking tokens; this is the escalation for hard work
+
+[fable]
+enabled  = true
+api      = "anthropic"
+base_url = "https://api.anthropic.com"
+model    = "claude-fable-5-1"
+key_env  = "ANTHROPIC_API_KEY"
+role     = "interactive"                 # local p90 is 10.2 s/turn; this is the latency spill target
+
+[jev]
+enabled  = false                         # BLOCKED: endpoint not yet known
+api      = "typesafe"                    # typed in/out; not conversational, no model id
+base_url = ""                            # <- fill from TypeSafe's docs
+key_env  = "TYPESAFE_API_KEY"
+role     = "classify"                    # COLD PATH ONLY. Measured warm RTT to a well-peered
+                                         # endpoint is ~10 ms; the routing budget is single-digit ms,
+                                         # so this must never sit in the hot path.
+
+[fugu]
+enabled  = false                         # BLOCKED: no API key, endpoint not yet known
+api      = "anthropic"                   # use its Anthropic Messages surface to reuse that adapter
+base_url = ""                            # <- fill from Sakana's docs
+model    = "fugu"                        # also fugu-ultra / fugu-max / fugu-cyber
+key_env  = "SAKANA_API_KEY"
+role     = "escalation"                  # tier 3: pay for managed coordination only when coordination failed

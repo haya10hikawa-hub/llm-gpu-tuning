@@ -33,9 +33,11 @@ class Class(str, Enum):
     ESCALATION = "escalation"
 
 
-# Local per-slot context ceiling. MUST be set from llama-server's reported
-# n_ctx_slot at startup, not from the 27k figure in the docs -- see plan 4.5 / R1.
-LOCAL_CTX_CEILING = 12288
+# Local per-slot context ceiling. MEASURED, not assumed: llama-server reports
+# n_ctx_slot = 16384 under --ctx-size 32768 --parallel 2 (kv_unified=false).
+# The KV pool IS divided across slots, so this tracks the launch flags:
+# re-read GET /props if they change. Never use the 27k figure from the docs.
+LOCAL_CTX_CEILING = 16384
 
 # Reserve for the response; a request is only local if prompt + this still fits.
 RESPONSE_RESERVE = 1024

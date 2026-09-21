@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 Group=ubuntu
+# Without these the process cannot open /dev/dri and silently falls back to CPU.
 SupplementaryGroups=render video
 EnvironmentFile=/etc/llm-api.env
 WorkingDirectory=/opt/llm-gpu-tuning
@@ -15,13 +16,15 @@ ExecStart=/opt/llm-gpu-tuning/work/llama.cpp/build/bin/llama-server \
   --alias qwen3.8-27b \
   --n-gpu-layers 99 \
   --ctx-size 32768 \
-  --parallel 2 \
+  --parallel 1 \
   --cache-type-k q8_0 --cache-type-v q8_0 \
+  --batch-size 512 --ubatch-size 256 \
   --jinja \
   --host 0.0.0.0 --port 8080 \
   --api-key ${LLAMA_API_KEY} \
   --metrics
-Restart=on-failure
+# always, not on-failure: a clean self-exit must also come back (residency).
+Restart=always
 RestartSec=10
 TimeoutStartSec=300
 TimeoutStopSec=60

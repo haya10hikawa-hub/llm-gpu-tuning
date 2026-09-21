@@ -6,11 +6,15 @@
 
 ```
 モデル   Qwen3.8-27B-UD-Q4_K_S (15.36 GB)
-ctx      32768 (--parallel 2 で 16384/slot)
+ctx      32768 (--parallel 1 = 1 リクエストで全量を使える)
 KV       q8_0  (k/v とも)
+batch    --batch-size 512 --ubatch-size 256
 その他   -ngl 99 --jinja --metrics
-bind     0.0.0.0:8080 + --api-key
+bind     0.0.0.0:8080 + --api-key + ufw で送信元を限定
 ```
+
+`--parallel 1` は長文向けの選択。2 にすると総スループットが 1.48 倍になる代わりに
+1 リクエストあたり 16384 トークンに半減する。用途で決める。
 
 ### KV を q8_0 にした理由
 
@@ -41,6 +45,9 @@ sudo systemctl daemon-reload && sudo systemctl enable --now llm-api
 落ちる** (27B で約 0.85 t/s)。
 
 起動は **63〜69 秒**。`TimeoutStartSec=300` を確保している。
+
+`Restart=always` にすること。`on-failure` だと**正常終了で再起動しない**。
+実際に 3 時間稼働後に status=0 で終了し、常駐が途切れた。
 
 ## 動作確認
 
@@ -75,11 +82,28 @@ curl -H "Authorization: Bearer $KEY" http://<host>:8080/v1/models
 **tool calling では元から推論を出さない** (48 タスクで thinking 平均 0)。
 エージェント用途では制御不要。
 
+## ファイアウォール
+
+`0.0.0.0` バインドのままでは LAN 全体に届く。**ufw で送信元を明示的に限定する。**
+設定は `deploy/ufw-rules.sh`。
+
+```
+既定          incoming=deny / outgoing=allow
+22/tcp        192.168.3.0/24, 10.96.71.0/24 のみ
+8080/tcp      192.168.3.98, 10.96.71.67 のみ
+9993/udp      Anywhere (ZeroTier は NAT 越えのため任意の対向から受ける必要がある)
+```
+
+**適用順序が重要。** SSH の許可を入れる前に `ufw enable` すると、実行中の SSH
+セッションごと切れる。本作業時は 4 本の SSH が張られていた。
+
+ufw には `22/tcp ALLOW IN Anywhere` が既存で入っていることがある。有効化後に
+削除しないと SSH が全世界に開いたままになる。
+
 ## セキュリティ
 
-`0.0.0.0` バインドは **LAN 全体に公開**する。本機は `ufw` 無効・iptables 全許可
-なので、API キーだけが防御線になる。
-
-- キーは `/etc/llm-api.env` (0600) に置き、リポジトリには入れない
+- キーは `/etc/llm-api.env` (0600) に置き、リポジトリにはテンプレートのみ
+- 防御は ufw の許可リストと API キーの 2 層。`--host 0.0.0.0` のままなので、
+  **ufw が落ちると LAN 全体に露出する**
 - LAN 外に出すならリバースプロキシ + TLS を前段に置く
-- 公開範囲を絞るなら `--host` を特定 IP にするか firewall で 8080 を制限する
+- 許可先の追加は `sudo ufw allow from <ip> to any port 8080 proto tcp`
