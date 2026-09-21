@@ -1,0 +1,5 @@
+stage,clock,model,env,pp_ts,tg_ts,mclk,sclk,busy,wall_s,error
+A,auto,Qwen3-8B-UD-Q3_K_XL.gguf,default,744.589164,79.044821,1000Mhz,1801Mhz,90.1,11.0,
+A,high,Qwen3-8B-UD-Q3_K_XL.gguf,default,745.297297,78.806206,1000Mhz,1801Mhz,89.6,9.3,
+A,manual-mclk0,Qwen3-8B-UD-Q3_K_XL.gguf,default,688.122463,47.218423,350Mhz,1801Mhz,93.7,12.8,
+A,manual-mclk2,Qwen3-8B-UD-Q3_K_XL.gguf,default,743.522755,78.42318,1000Mhz,1801Mhz,93.1,9.3,

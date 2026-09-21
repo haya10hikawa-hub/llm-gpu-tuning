@@ -1,0 +1,18 @@
+{
+  "default": {},
+
+  "user_original": {
+    "GGML_VK_DISABLE_MMVQ": "1",
+    "GGML_VK_DISABLE_INTEGER_DOT_PRODUCT": "1",
+    "GGML_VK_ALLOW_GRAPHICS_QUEUE": "1"
+  },
+
+  "no_int_dot": { "GGML_VK_DISABLE_INTEGER_DOT_PRODUCT": "1" },
+  "no_dot2": { "GGML_VK_DISABLE_DOT2": "1" },
+  "no_mmvq": { "GGML_VK_DISABLE_MMVQ": "1" },
+  "force_mmvq": { "GGML_VK_FORCE_MMVQ": "1" },
+  "graphics_queue": { "GGML_VK_ALLOW_GRAPHICS_QUEUE": "1" },
+  "no_f16": { "GGML_VK_DISABLE_F16": "1" },
+  "no_fusion": { "GGML_VK_DISABLE_FUSION": "1" },
+  "no_graph_opt": { "GGML_VK_DISABLE_GRAPH_OPTIMIZE": "1" }
+}

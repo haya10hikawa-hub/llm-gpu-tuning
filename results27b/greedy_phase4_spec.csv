@@ -1,0 +1,5 @@
+phase,spec_type,draft_max,accept,tg_ts,wall_s,rc
+4,draft-mtp,2,68,15.17,68.4,0
+4,draft-mtp,4,79,16.20,74.2,0
+4,draft-mtp,8,83,11.43,94.6,0
+4,ngram-simple,4,0,8.43,70.6,0

@@ -1,0 +1,11 @@
+stage,clock,model,env,pp_ts,tg_ts,mclk,busy,wall_s,error
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,default,742.799213,78.63347,1000Mhz,90.3,9.3,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,user_original,361.316988,70.365262,1000Mhz,93.9,13.0,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,no_int_dot,360.930142,69.523091,1000Mhz,95.8,12.8,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,no_dot2,740.812334,78.699672,1000Mhz,89.1,9.3,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,no_mmvq,741.072504,69.212106,1000Mhz,90.7,10.0,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,force_mmvq,741.413335,78.600776,1000Mhz,90.0,9.3,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,graphics_queue,750.79615,81.612021,1000Mhz,91.8,9.0,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,no_f16,776.258697,78.894447,1000Mhz,93.1,9.5,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,no_fusion,735.327135,73.47295,1000Mhz,94.3,9.8,
+B,auto,Qwen3-8B-UD-Q3_K_XL.gguf,no_graph_opt,734.781889,72.223574,1000Mhz,89.6,9.8,
