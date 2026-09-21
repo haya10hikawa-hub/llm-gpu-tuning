@@ -9,3 +9,4 @@ amdvlk/
 work/
 __pycache__/
 *.pyc
+models27b_bartowski/
