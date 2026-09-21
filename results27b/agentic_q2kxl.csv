@@ -1,0 +1,25 @@
+cat,prompt,tool_ok,args_ok,called,detail,sec,think_tok,total_tok
+A,What's the weather in Osaka right now?,1,1,get_weather,,9.7,0,80
+A,Send an email to bob@example.com with th,1,1,send_email,,4.5,0,94
+A,How much is Apple stock trading at?,1,1,get_stock_price,,2.9,0,57
+A,Read the file /etc/hostname for me.,1,1,read_file,,3.1,0,60
+A,Convert 250 US dollars to Japanese yen.,1,1,convert_currency,,5.3,0,114
+A,Query the analytics database for the tot,1,1,run_sql,,4.6,0,97
+A,Book a meeting called Design Review on 2,1,1,create_calendar_event,,6.0,0,130
+A,What will the weather in Berlin be like ,1,1,get_forecast,,3.7,0,76
+B,Look up what our internal onboarding doc,1,1,search_docs,,3.9,0,79
+B,Search the public internet for reviews o,1,1,search_web,,5.4,0,116
+B,I need the forecast for Kyoto for the ne,1,1,get_forecast,,3.8,0,76
+B,Is it raining in Kyoto at the moment?,1,1,get_weather,,2.9,0,54
+B,Find the company policy document about e,1,1,search_docs,,3.3,0,64
+B,What is the current temperature in Reykj,1,1,get_weather,,4.0,0,80
+C,Convert 1499.99 euros into Swiss francs.,1,1,convert_currency,,4.3,0,89
+C,Put 'Quarterly Planning' on the calendar,1,1,create_calendar_event,,7.5,0,162
+C,Give me the weather for Sao Paulo in cel,1,1,get_weather,,3.8,0,75
+C,Get me a 10 day outlook for Nairobi.,1,1,get_forecast,,3.9,0,79
+C,What is the share price of ticker MSFT?,1,1,get_stock_price,,3.1,0,58
+C,Search the web for gfx906 vulkan benchma,1,1,search_web,,4.3,0,88
+D,Explain in one sentence what a roofline ,1,1,-,,5.5,0,117
+D,What is 17 multiplied by 23?,1,1,-,,4.6,0,94
+D,"Thanks, that was helpful.",1,1,-,,8.0,0,179
+D,Which is generally faster for matrix mul,1,1,-,,21.8,0,512
