@@ -3,7 +3,7 @@
 # Q4_K_M / Q5 / Q6 / Q8_0 are deliberately excluded: they exceed VRAM and would
 # force partial CPU offload, which makes the GPU comparison meaningless.
 set -u
-DEST=/home/ubuntu/Desktop/dirOllamaSetting/models27b
+DEST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/models"
 REPO=unsloth/Qwen3.8-27B-GGUF
 mkdir -p "$DEST"
 
@@ -27,4 +27,4 @@ done
 
 echo "=== done ==="
 ls -la "$DEST"
-df -h /home | tail -1
+df -h "$DEST" | tail -1

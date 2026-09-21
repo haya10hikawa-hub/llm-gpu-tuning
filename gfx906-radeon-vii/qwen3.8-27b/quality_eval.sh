@@ -2,19 +2,20 @@
 # Perplexity across the 27B quant series. Speed work so far never checked
 # quality, so this measures the degradation curve on a common corpus.
 set -u
-ROOT=/home/ubuntu/Desktop/dirOllamaSetting
-B=$ROOT/work/llama.cpp/build/bin
-CORPUS=$ROOT/corpus/wiki.test.raw
-OUT=$ROOT/results27b/quality_ppl.csv
-LOG=/tmp/claude-1000/-home-ubuntu-Desktop-dirOllamaSetting/60c74b66-1de7-445b-8ab5-15348a1f5583/scratchpad
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+B=${LLAMA_BIN:-$REPO/work/llama.cpp/build/bin}
+CORPUS=$HERE/corpus/wiki.test.raw
+OUT=$HERE/results/quality_ppl.csv
+LOG=${TMPDIR:-/tmp}
 CHUNKS=${1:-40}
 
-$ROOT/gpuclk.sh high >/dev/null 2>&1
+$REPO/gfx906-radeon-vii/gpuclk.sh high >/dev/null 2>&1
 echo "model,size_gb,ppl,ppl_err,status" > $OUT
 
 for name in Qwen3.8-27B-UD-Q2_K_XL Qwen3.8-27B-UD-IQ3_XXS Qwen3.8-27B-UD-Q3_K_XL \
             Qwen3.8-27B-UD-IQ4_XS Qwen3.8-27B-UD-Q4_K_S; do
-  f=$ROOT/models27b/$name.gguf
+  f=$HERE/models/$name.gguf
   [ -s "$f" ] || { echo "$name,,,,MISSING" >> $OUT; continue; }
   sz=$(stat -c%s "$f")
 
@@ -37,4 +38,4 @@ for name in Qwen3.8-27B-UD-Q2_K_XL Qwen3.8-27B-UD-IQ3_XXS Qwen3.8-27B-UD-Q3_K_XL
 done
 
 echo "=== done -> $OUT ==="
-$ROOT/gpuclk.sh auto >/dev/null 2>&1
+$REPO/gfx906-radeon-vii/gpuclk.sh auto >/dev/null 2>&1

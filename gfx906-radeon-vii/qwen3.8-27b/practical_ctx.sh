@@ -3,16 +3,17 @@
 # 49 of 65 layers are linear attention with a fixed-size state, so degradation
 # should be gentler than a plain transformer. This checks that.
 set -u
-ROOT=/home/ubuntu/Desktop/dirOllamaSetting
-B=$ROOT/work/llama.cpp/build/bin
-M=$ROOT/models27b/Qwen3.8-27B-UD-Q3_K_XL.gguf
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+B=${LLAMA_BIN:-$REPO/work/llama.cpp/build/bin}
+M=$HERE/models/Qwen3.8-27B-UD-Q3_K_XL.gguf
 C=/sys/class/drm/card1/device
-LOG=/tmp/claude-1000/-home-ubuntu-Desktop-dirOllamaSetting/60c74b66-1de7-445b-8ab5-15348a1f5583/scratchpad
-OUT=$ROOT/results27b/ctx_scaling.csv
+LOG=${TMPDIR:-/tmp}
+OUT=$HERE/results/ctx_scaling.csv
 PORT=11437
 CTK=${1:-f16}
 
-$ROOT/gpuclk.sh high >/dev/null 2>&1
+$REPO/gfx906-radeon-vii/gpuclk.sh high >/dev/null 2>&1
 GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 nohup $B/llama-server -m $M -ngl 99 -c 49152 \
   -ctk $CTK -ctv $CTK --host 127.0.0.1 --port $PORT --parallel 1 > $LOG/srv2.log 2>&1 &
 SRV=$!

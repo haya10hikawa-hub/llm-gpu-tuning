@@ -3,16 +3,17 @@
 # track clocks / temperature / power / VRAM. Covers thermal throttling,
 # allocator drift and stability in one run.
 set -u
-ROOT=/home/ubuntu/Desktop/dirOllamaSetting
-B=$ROOT/work/llama.cpp/build/bin
-M=$ROOT/models27b/Qwen3.8-27B-UD-Q4_K_S.gguf
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+B=${LLAMA_BIN:-$REPO/work/llama.cpp/build/bin}
+M=$HERE/models/Qwen3.8-27B-UD-Q4_K_S.gguf
 C=/sys/class/drm/card1/device
-OUT=$ROOT/results27b/sustained.csv
-LOG=/tmp/claude-1000/-home-ubuntu-Desktop-dirOllamaSetting/60c74b66-1de7-445b-8ab5-15348a1f5583/scratchpad
+OUT=$HERE/results/sustained.csv
+LOG=${TMPDIR:-/tmp}
 DURATION=${1:-1500}   # seconds
 PORT=11436
 
-$ROOT/gpuclk.sh high >/dev/null 2>&1
+$REPO/gfx906-radeon-vii/gpuclk.sh high >/dev/null 2>&1
 hw(){ ls $C/hwmon/hwmon*/$1 2>/dev/null | head -1; }
 
 GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 nohup $B/llama-server -m $M -ngl 99 -c 8192 \

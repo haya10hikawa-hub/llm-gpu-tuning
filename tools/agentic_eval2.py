@@ -239,7 +239,7 @@ def run(server):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default="http://127.0.0.1:11439")
-    ap.add_argument("--out", default="/home/ubuntu/Desktop/dirOllamaSetting/results27b/agentic2.csv")
+    ap.add_argument("--out", default="results/agentic2.csv")
     a = ap.parse_args()
     print(f"{'cat':3s} {'task':34s} {'ok':3s} {'sec':>7s}  note")
     R = run(a.server)

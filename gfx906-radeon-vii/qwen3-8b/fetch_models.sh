@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download the Qwen3-8B GGUF variants used by the benchmark matrix.
 set -u
-DEST=/home/ubuntu/Desktop/dirOllamaSetting/models
+DEST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/models"
 REPO=unsloth/Qwen3-8B-GGUF
 mkdir -p "$DEST"
 
@@ -24,4 +24,4 @@ done
 
 echo "=== done ==="
 ls -la "$DEST"
-df -h /home | tail -1
+df -h "$DEST" | tail -1

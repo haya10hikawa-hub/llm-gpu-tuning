@@ -193,7 +193,7 @@ def args_match(got, want):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default="http://127.0.0.1:11439")
-    ap.add_argument("--out", default="/home/ubuntu/Desktop/dirOllamaSetting/results27b/agentic.csv")
+    ap.add_argument("--out", default="results/agentic.csv")
     ap.add_argument("--label", default="")
     args = ap.parse_args()
 

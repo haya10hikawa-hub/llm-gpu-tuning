@@ -26,11 +26,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from run_bench import (LLAMA, ClockSampler, fmt, run_llama_bench, set_clock,
                        write_csv)
 
-ROOT = Path("/home/ubuntu/Desktop/dirOllamaSetting")
-M27 = ROOT / "models27b"
-MODEL = M27 / "Qwen3.8-27B-UD-Q3_K_XL.gguf"
-DRAFT = M27 / "mtp-Qwen3.8-27B-Q4_0.gguf"
-OUT = ROOT / "results27b"
+ROOT = Path(os.environ.get("LLM_TUNING_ROOT", Path(__file__).resolve().parents[1]))
+M27 = Path(os.environ.get("BENCH_MODELS", ROOT / "models"))
+MODEL = M27 / os.environ.get("BENCH_MODEL", "Qwen3.8-27B-UD-Q3_K_XL.gguf")
+DRAFT = M27 / os.environ.get("BENCH_DRAFT", "mtp-Qwen3.8-27B-Q4_0.gguf")
+OUT = Path(os.environ.get("BENCH_RESULTS", ROOT / "results"))
 OUT.mkdir(exist_ok=True)
 
 # Phase 1: one knob at a time, decode only. max_nodes_per_submit defaults to 100.

@@ -2,17 +2,18 @@
 # Stage 0: re-run the env sweep that the earlier (fragmented / llama-bench) runs invalidated.
 # One GPU job at a time, GPU use verified per run, control interleaved to catch drift.
 set -u
-ROOT=/home/ubuntu/Desktop/dirOllamaSetting
-B=$ROOT/work/llama.cpp/build/bin
-M=$ROOT/models27b/Qwen3.8-27B-UD-Q4_K_S.gguf
-OUT=$ROOT/results27b/stage0_env.csv
-LOG=/tmp/claude-1000/-home-ubuntu-Desktop-dirOllamaSetting/60c74b66-1de7-445b-8ab5-15348a1f5583/scratchpad
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+B=${LLAMA_BIN:-$REPO/work/llama.cpp/build/bin}
+M=$HERE/models/Qwen3.8-27B-UD-Q4_K_S.gguf
+OUT=$HERE/results/stage0_env.csv
+LOG=${TMPDIR:-/tmp}
 PROMPT=$LOG/long.txt
 
 # base config applied to every run
 BASE_ENV=(GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1)
 
-$ROOT/gpuclk.sh high >/dev/null 2>&1
+$REPO/gfx906-radeon-vii/gpuclk.sh high >/dev/null 2>&1
 [ -s "$PROMPT" ] || python3 -c "
 t='The Radeon VII is a Vega 20 GPU with 60 compute units, 16 GB of HBM2 memory on a 4096-bit bus, and no matrix cores. Autoregressive decoding reads every weight once per token, so throughput is bounded by memory bandwidth unless dequantization becomes the limit. '
 open('$PROMPT','w').write(t*14)"
@@ -60,4 +61,4 @@ run "DISABLE_ASYNC"                     GGML_VK_DISABLE_ASYNC=1
 run "base(control-6)"                   X=1
 
 echo "=== done -> $OUT ==="
-$ROOT/gpuclk.sh auto >/dev/null 2>&1
+$REPO/gfx906-radeon-vii/gpuclk.sh auto >/dev/null 2>&1

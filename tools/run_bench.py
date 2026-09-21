@@ -20,8 +20,9 @@ import threading
 import time
 from pathlib import Path
 
-ROOT = Path("/home/ubuntu/Desktop/dirOllamaSetting")
-LLAMA = ROOT / "work/llama.cpp/build/bin"
+# repo root is the parent of tools/. Override with LLM_TUNING_ROOT.
+ROOT = Path(os.environ.get("LLM_TUNING_ROOT", Path(__file__).resolve().parents[1]))
+LLAMA = Path(os.environ.get("LLAMA_BIN", ROOT / "work/llama.cpp/build/bin"))
 MODELS = Path(os.environ.get("BENCH_MODELS", ROOT / "models"))
 RESULTS = Path(os.environ.get("BENCH_RESULTS", ROOT / "results"))
 CARD = Path("/sys/class/drm/card1/device")

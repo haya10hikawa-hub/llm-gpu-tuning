@@ -1,12 +1,16 @@
-# GGUF files are huge; fetch_models*.sh re-downloads them
-models/
-models27b/
+# Model weights are huge; each model dir has a fetch script
+*/*/models/
+# Evaluation corpora are re-downloadable
+*/*/corpus/
+# llama.cpp is reproduced from upstream + <gpu>/patches (own git tree)
+work/
+# Scratch from earlier runs
+amdvlk/
 ollama_models/
 ollama_test/
+models/
+models27b/
+models27b_bartowski/
 corpus/
-amdvlk/
-# llama.cpp is reproduced from upstream + docs/patches (own git tree)
-work/
 __pycache__/
 *.pyc
-models27b_bartowski/
