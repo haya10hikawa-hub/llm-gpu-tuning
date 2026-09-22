@@ -1,0 +1,2 @@
+model,quant,run_kind,file_mib,vram_mib,prefill_tok_s,decode_tok_s,status
+K2-Horizon-7B,Q4_K_M,legacy-quant-sweep,5333,7822,628.5,76.6,single-run-retained-row
