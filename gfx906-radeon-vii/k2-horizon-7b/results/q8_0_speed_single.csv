@@ -1,0 +1,3 @@
+model,quant,run_kind,prompt_tokens,generated_tokens,prompt_ms,predicted_ms,prefill_tok_s,decode_tok_s,cache_n,status
+K2-Horizon-7B,Q8_0,prefill,2042,8,6621.832,134.228,308.373876,52.150073,0,verified-single-run
+K2-Horizon-7B,Q8_0,decode,31,180,182.199,3216.526,170.143634,55.650102,0,verified-single-run
