@@ -9,6 +9,9 @@ GPU × LLM モデルの組み合わせごとに、**何が効いて何が効か�
 |---|---|---|
 | [gfx906-radeon-vii](gfx906-radeon-vii/) | [Qwen3.8-27B](gfx906-radeon-vii/qwen3.8-27b/) | decode +98% / prefill +75%。コード変更 7 行。OpenAI 互換 API として常駐 |
 | | [Qwen3-8B](gfx906-radeon-vii/qwen3-8b/) | 比較用。環境変数の誤設定で prefill −51% を検出 |
+| | [K2-Horizon-7B](gfx906-radeon-vii/k2-horizon-7b/) | Q4_K_M 単発で prefill 628.5 / decode 76.6 tok/s。Q4〜Q8 を測定 |
+| | [MiMo-V2.6-Distill-Qwen-9B](gfx906-radeon-vii/mimo-v2.6-distill-qwen-9b/) | 単発で最大 prefill 743.66 / decode 74.61 tok/s。Q4〜Q8 を測定 |
+| | [Bonsai 2 27B](https://github.com/haya10hikawa-hub/llm-gpu-tuning/tree/docs/bonsai-2-27b/gfx906-radeon-vii/bonsai-2-27b) | decode 8.74 → 31.38 tok/s、prefill 59.58 → 105.14 tok/s。現在 docs/bonsai-2-27b branch |
 
 ## 構成
 
