@@ -1,0 +1,5 @@
+run,binary,harness,ctx,kv,thinking,hvv,milestone,rc,sec,tests,output_tokens_max,status
+unpatched-grammar,llama.cpp-bonsai@842b188,pi-0.73.1,65536,q4_0,off,unset,M1,,,,16000,runaway to output limit
+toolfix,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off,1,M1,0,1491.7,A 23/23,,pass
+toolfix,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off,1,M2,0,2858.6,A 23/23 B 28/28,,pass
+toolfix,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off,1,M3,,,,,running

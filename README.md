@@ -9,6 +9,7 @@ GPU × LLM モデルの組み合わせごとに、**何が効いて何が効か�
 |---|---|---|
 | [gfx906-radeon-vii](gfx906-radeon-vii/) | [Qwen3.8-27B](gfx906-radeon-vii/qwen3.8-27b/) | decode +98% / prefill +75%。コード変更 7 行。OpenAI 互換 API として常駐 |
 | | [Qwen3-8B](gfx906-radeon-vii/qwen3-8b/) | 比較用。環境変数の誤設定で prefill −51% を検出 |
+| | [Bonsai 2 27B](gfx906-radeon-vii/bonsai-2-27b/) | Qwen3.8-27B の三値版。環境変数 1 つで decode 3.6 倍 |
 
 ## 構成
 
