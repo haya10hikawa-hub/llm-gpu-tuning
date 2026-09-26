@@ -53,7 +53,10 @@ CPU 側など        3.0 ms     -
 ## エージェント評価 (思考オン, 12 題)
 
 11 題が全テスト合格、T07 のみ不合格 ([results/agent_tasks.csv](results/agent_tasks.csv))。
-思考オフの再計測は実行中。
+
+思考オフ (`enable_thinking=false`) は MQL で M1・M2 合格、M3 は C 7/19
+([results/agent_mql.csv](results/agent_mql.csv))。12 題は T01 が 9/19 (5588 s) と
+思考オンより遅く低得点だったため打ち切った。**エージェント用途は思考オンを使う。**
 
 ## ドキュメント
 

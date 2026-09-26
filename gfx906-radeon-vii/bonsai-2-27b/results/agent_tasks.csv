@@ -14,3 +14,5 @@ bonsai-2-27b PQ2_0,on,6000,T12,1198.2,13/13,pass
 bonsai-2-27b PQ2_0,off (enable_thinking=false),6000,M1,2558.4,A 23/23,pass
 mimo-9b Q4_K_M,off,6000,T08,1245.6,0/2,fail (rerun of a 2400 s timeout)
 mimo-9b Q4_K_M,on,6000,T05,1758.3,17/25,partial (rerun of a 2400 s timeout)
+bonsai-2-27b PQ2_0,off (enable_thinking=false),6000,T01,5588.3,9/19,partial
+bonsai-2-27b PQ2_0,off (enable_thinking=false),6000,T02-T12,,,stopped (slower and lower than thinking on at T01)
