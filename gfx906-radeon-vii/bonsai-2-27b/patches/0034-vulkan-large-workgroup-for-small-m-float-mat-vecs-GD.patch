@@ -1,0 +1,48 @@
+From bd9f8cf0cc1ab0ec731406a5bf8ee12da3f2eba8 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Sat, 26 Sep 2026 13:32:08 +0000
+Subject: [PATCH 34/34] vulkan: large workgroup for small-m float mat-vecs (GDN
+ alpha/beta, bf16 48 x 5120); tests: bf16 m=48/96 perf
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 7 +++++++
+ tests/test-backend-ops.cpp           | 4 ++++
+ 2 files changed, 11 insertions(+)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 1290b61..26ec327 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -8123,6 +8123,13 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context *
+         }
+     }
+ 
++    // a few rows of a float matrix (Bonsai GDN alpha/beta: 48 x 5120 bf16) leave most CUs idle with one subgroup per
++    // workgroup; the large workgroup splits each row over more lanes (bf16 m=96: 9.0 -> 6.6 us)
++    if (b_type != GGML_TYPE_Q8_1 && (a_type == GGML_TYPE_BF16 || a_type == GGML_TYPE_F16 || a_type == GGML_TYPE_F32) &&
++        m <= 256 && k >= 2048 && getenv("GGML_VK_NO_SMALL_M_LARGE_WG") == nullptr) {
++        dmmv_wg = DMMV_WG_SIZE_LARGE;
++    }
++
+     static const char * dmmv_wg_env = getenv("GGML_VK_DMMV_WG");
+     if (dmmv_wg_env) {
+         dmmv_wg = atoi(dmmv_wg_env) ? DMMV_WG_SIZE_LARGE : DMMV_WG_SIZE_SUBGROUP;
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index ff8d709..aac85b9 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -10695,6 +10695,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+     std::vector<std::unique_ptr<test_case>> test_cases;
+ 
++    // GDN alpha / beta projections of Bonsai 2 27B at decode: bf16, 48 rows (96 if merged)
++    for (int64_t m : {48, 96}) {
++        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_BF16, GGML_TYPE_F32, m, 1, 5120, {1, 1}, {1, 1}));
++    }
+     // decode attention of Bonsai 2 27B: GQA 6, head 256, KV f16
+     for (int64_t kv : {4096, 32768}) {
+         test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+-- 
+2.53.0
+

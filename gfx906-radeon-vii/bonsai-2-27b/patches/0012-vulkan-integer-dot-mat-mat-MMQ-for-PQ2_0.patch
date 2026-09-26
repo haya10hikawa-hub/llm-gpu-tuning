@@ -1,0 +1,87 @@
+From 757682003a88583a7791fcbd68e117759fffa71f Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 08:10:58 +0000
+Subject: [PATCH 12/34] vulkan: integer-dot mat-mat (MMQ) for PQ2_0
+
+PQ2_0 had no MMQ pipeline, so prefill ran the dequant-to-f16 path at 5.4 TOPS (Q2_0 MMQ: 16.3 TOPS on the
+same GPU). Reuse the Q2_0 MMQ code with 4 sub-blocks per 128-value block.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp                      | 2 ++
+ ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl    | 8 +++++++-
+ .../ggml-vulkan/vulkan-shaders/mul_mmq_shmem_types.glsl   | 2 +-
+ .../src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp | 2 +-
+ 4 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 57e64f8..9830123 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -4946,6 +4946,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+         if (device->integer_dot_product) {
+             CREATE_MMQ(GGML_TYPE_Q2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q2_0], matmul_q2_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
++            CREATE_MMQ(GGML_TYPE_PQ2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_PQ2_0], matmul_pq2_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
+             CREATE_MMQ(GGML_TYPE_Q4_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q4_0], matmul_q4_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
+             CREATE_MMQ(GGML_TYPE_Q4_1, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q4_1], matmul_q4_1_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
+             CREATE_MMQ(GGML_TYPE_Q5_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q5_0], matmul_q5_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
+@@ -5129,6 +5130,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+         if (device->integer_dot_product) {
+             CREATE_MMQ(GGML_TYPE_Q2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q2_0].f32acc, matmul_q2_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
++            CREATE_MMQ(GGML_TYPE_PQ2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_PQ2_0].f32acc, matmul_pq2_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
+             CREATE_MMQ(GGML_TYPE_Q4_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q4_0].f32acc, matmul_q4_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
+             CREATE_MMQ(GGML_TYPE_Q4_1, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q4_1].f32acc, matmul_q4_1_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
+             CREATE_MMQ(GGML_TYPE_Q5_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q5_0].f32acc, matmul_q5_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl
+index 24da4f7..38b3dc6 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_funcs.glsl
+@@ -6,10 +6,16 @@
+ 
+ // Each iqs value maps to a 32-bit integer
+ 
+-#if defined(DATA_A_Q2_0)
++#if defined(DATA_A_Q2_0) || defined(DATA_A_PQ2_0)
+ void block_a_to_shmem(const uint buf_ib, const uint ib, const uint iqs) {
++    // ib counts 32-value sub-blocks: 2 per Q2_0 block (group 64), 4 per PQ2_0 block (group 128)
++#if defined(DATA_A_PQ2_0)
++    const uint block_idx = ib / 4;
++    const uint byte_idx = (ib & 3u) * 8u + iqs;
++#else
+     const uint block_idx = ib / 2;
+     const uint byte_idx = (ib & 1u) * 8u + iqs;
++#endif
+     const uint bits = uint(data_a[block_idx].qs[byte_idx]);
+     buf_a[buf_ib].qs[iqs] = pack32(i8vec4(
+         int8_t(bits & 3u),
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_shmem_types.glsl b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_shmem_types.glsl
+index 2b7adcb..b7f9321 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_shmem_types.glsl
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mmq_shmem_types.glsl
+@@ -13,7 +13,7 @@ struct block_a_cache {
+     uint32_t qs[16/4];
+     FLOAT_TYPE dm;
+ };
+-#elif defined(DATA_A_Q2_0)
++#elif defined(DATA_A_Q2_0) || defined(DATA_A_PQ2_0)
+ #define QUANT_R_MMQ 1
+ struct block_a_cache {
+     int32_t qs[8];
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index d6f3243..7aac12b 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -629,7 +629,7 @@ void matmul_shaders(bool fp16, MatMulIdType matmul_id_type, bool coopmat, bool c
+ 
+ #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+         // Integer dot mmq performs better with f32 accumulators (different shader, skip for dot2)
+-        if (!f16acc && !coopmat && !coopmat2 && !dot2 && (is_legacy_quant(tname) || is_k_quant(tname) || tname == "mxfp4")) {
++        if (!f16acc && !coopmat && !coopmat2 && !dot2 && (is_legacy_quant(tname) || is_k_quant(tname) || tname == "mxfp4" || tname == "pq2_0")) {
+             string_to_spv(shader_name + "_" + tname + "_q8_1", "mul_mmq.comp", merge_maps(merge_maps(base_dict, float_type_dict), {{data_a_key, "1"}, {"D_TYPE", "float"},}), fp16, coopmat, coopmat2, f16acc);
+         }
+ #endif
+-- 
+2.53.0
+

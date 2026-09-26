@@ -1,0 +1,44 @@
+Make the newlines around tool-call XML tags optional (common/chat.cpp).
+
+The tool-call grammar requires exactly "\n</parameter>\n". A model that drops one
+of those newlines never closes the grammar and keeps generating until the output
+limit (Bonsai 2 27B: 16000 tokens on the first task). GPU independent.
+Against PrismML-Eng/llama.cpp 842b188.
+
+--- a/common/chat.cpp
++++ b/common/chat.cpp
+@@ -1242,9 +1242,11 @@
+ 
+         // Tool call parser
+         if (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
+-            auto arg_close  = p.tool_arg_close(p.literal("\n</parameter>\n"));
++            // some models omit the newline around </parameter>. make it optional; the value runs up to
++            // whichever of "\n</parameter>" or "</parameter>" comes first (no trailing newline, as in the canonical form)
++            auto arg_close  = p.tool_arg_close(p.optional(p.literal("\n")) + p.literal("</parameter>") + p.optional(p.literal("\n")));
+             auto arg_string = p.rule("xml-arg-string",
+-                p.ac(p.tool_arg_string_value(p.until("\n</parameter>\n")) + arg_close, "\n</parameter>\n"));
++                p.ac(p.tool_arg_string_value(p.until_one_of({ "\n</parameter>", "</parameter>" })) + arg_close, "</parameter>"));
+ 
+             auto tool_choice = p.choice();
+             foreach_function(inputs.tools, [&](const json & tool) {
+@@ -1261,7 +1263,7 @@
+                 foreach_parameter(function, [&](const std::string & param_name, const json & param_schema, bool is_required) {
+                     auto rule_name = "tool-" + name + "-arg-" + param_name;
+ 
+-                    auto arg_open = p.tool_arg_open("<parameter=" + p.tool_arg_name(p.literal(param_name)) + ">\n");
++                    auto arg_open = p.tool_arg_open("<parameter=" + p.tool_arg_name(p.literal(param_name)) + ">" + p.optional(p.literal("\n")));
+ 
+                     auto arg_value = schema_info.resolves_to_string(param_schema) ?
+                         arg_string :
+@@ -1279,9 +1281,9 @@
+                     args = args + p.zero_or_more(p.choice(optional_args));
+                 }
+ 
+-                auto func = p.tool(p.tool_open("<function=" + p.tool_name(p.literal(name)) + ">\n") +
++                auto func = p.tool(p.tool_open("<function=" + p.tool_name(p.literal(name)) + ">" + p.optional(p.literal("\n"))) +
+                                    p.tool_args(args) +
+-                                   p.tool_close(p.literal("</function>\n")));
++                                   p.tool_close(p.literal("</function>") + p.optional(p.literal("\n"))));
+ 
+                 tool_choice |= p.rule("tool-" + name, func);
+             });

@@ -1,0 +1,386 @@
+From afc0763426a683065827968f8bed8f742f261d14 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 11:17:59 +0000
+Subject: [PATCH 21/34] vulkan: decode conv step in one dispatch; skip list for
+ nodes an earlier dispatch already did
+
+CONCAT(conv state, x^T) -> SSM_CONV -> SILU and the CPY of the shifted window back over the state (an identity
+view of the cache row) run as one conv_step dispatch at the CONCAT (-96 launches per Bonsai decode token; same
+arithmetic as ssm_conv.comp). build_graph returns early for listed nodes, so they cost neither a dispatch nor a
+barrier; the dispatch that did their work records what it wrote. Never the last computed node. The GDN in-place
+CPY uses the list too. GGML_VK_DISABLE_CONV_STEP turns it off. Test: CONV_STEP.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp          | 145 ++++++++++++++++--
+ .../ggml-vulkan/vulkan-shaders/conv_step.comp |  44 ++++++
+ .../vulkan-shaders/vulkan-shaders-gen.cpp     |   1 +
+ tests/test-backend-ops.cpp                    |  43 ++++++
+ 4 files changed, 222 insertions(+), 11 deletions(-)
+ create mode 100644 ggml/src/ggml-vulkan/vulkan-shaders/conv_step.comp
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 1223d43..460b496 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1096,6 +1096,7 @@ struct vk_device_struct {
+     vk_pipeline pipeline_ssm_scan_f32_d256;
+     vk_pipeline pipeline_ssm_conv_f32;
+     vk_pipeline pipeline_ssm_conv_silu_f32;
++    vk_pipeline pipeline_conv_step_f32;
+     vk_pipeline pipeline_ssm_conv_bias_silu_f32;
+     vk_pipeline pipeline_opt_step_adamw_f32;
+     vk_pipeline pipeline_opt_step_sgd_f32;
+@@ -1917,6 +1918,16 @@ struct vk_op_ssm_scan_push_constants {
+     uint32_t n_head, d_head, n_group, n_tok;
+     uint32_t n_seq, K;
+ };
++struct vk_op_conv_step_push_constants {
++    uint32_t C;
++    uint32_t st_off;
++    uint32_t x_off;
++    uint32_t x_stride;
++    uint32_t w_off;
++    uint32_t w_stride;
++    uint32_t d_off;
++};
++
+ struct vk_op_ssm_conv_push_constants {
+     uint32_t nb01, nb02;
+     uint32_t nb11;
+@@ -2443,8 +2454,8 @@ struct ggml_backend_vk_context {
+     topk_moe_mode fused_topk_moe_mode {};
+     bool fused_topk_moe_scale {};
+     bool fused_mul_fwht {};
+-    // CPY node made redundant by a GATED_DELTA_NET that stored its state in place
+-    const ggml_tensor * gdn_inplace_skip {};
++    // nodes whose work an earlier dispatch already did (GDN in-place state, conv step); build_graph skips them
++    std::vector<const ggml_tensor *> skip_nodes;
+     bool fused_glu_fwht {};
+     bool fused_norm_fwht {};
+     bool fused_norm_fwht_dual {};
+@@ -6051,6 +6062,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_ssm_conv_f32,           "ssm_conv_f32",           ssm_conv_f32_len, ssm_conv_f32_data, "main", 4, sizeof(vk_op_ssm_conv_push_constants), {32, 16, 1}, {32, 16, 0, 0}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_ssm_conv_silu_f32,      "ssm_conv_silu_f32",      ssm_conv_f32_len, ssm_conv_f32_data, "main", 4, sizeof(vk_op_ssm_conv_push_constants), {32, 16, 1}, {32, 16, 0, 1}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_conv_step_f32, "conv_step_f32", conv_step_f32_len, conv_step_f32_data, "main", 4, sizeof(vk_op_conv_step_push_constants), {256, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_ssm_conv_bias_silu_f32, "ssm_conv_bias_silu_f32", ssm_conv_f32_len, ssm_conv_f32_data, "main", 4, sizeof(vk_op_ssm_conv_push_constants), {32, 16, 1}, {32, 16, 1, 1}, 1);
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_opt_step_adamw_f32, "opt_step_adamw_f32", opt_step_adamw_f32_len, opt_step_adamw_f32_data, "main", 5, sizeof(vk_op_push_constants), {512, 1, 1}, {}, 1);
+@@ -13244,6 +13256,17 @@ static void ggml_vk_gated_linear_attn(ggml_backend_vk_context * ctx, vk_context&
+         pc, { (uint32_t)(n_seqs * n_heads), 1, 1 });
+ }
+ 
++// a skipped node must not be the last one computed: that one closes and submits the command buffer
++static bool ggml_vk_has_later_work(const struct ggml_cgraph * cgraph, int node_idx) {
++    for (int j = node_idx + 1; j < cgraph->n_nodes; j++) {
++        const ggml_tensor * n = cgraph->nodes[j];
++        if (!ggml_is_empty(n) && !ggml_op_is_empty(n->op) && n->buffer && (n->flags & GGML_TENSOR_FLAG_COMPUTE)) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ static int ggml_vk_node_index(const struct ggml_cgraph * cgraph, const ggml_tensor * t, int hint) {
+     for (int j = std::max(0, hint - 64); j < cgraph->n_nodes; j++) {
+         if (cgraph->nodes[j] == t) {
+@@ -13288,7 +13311,7 @@ static const ggml_tensor * ggml_vk_gdn_inplace_cpy(const struct ggml_cgraph * cg
+             return nullptr;
+         }
+         if (c->type != GGML_TYPE_F32 || !ggml_is_contiguous(c) || c->buffer != st->buffer || c->data != st->data ||
+-            ggml_nbytes(c) != ggml_nbytes(st)) {
++            ggml_nbytes(c) != ggml_nbytes(st) || !ggml_vk_has_later_work(cgraph, j)) {
+             return nullptr;
+         }
+         return c;
+@@ -13356,15 +13379,19 @@ static void ggml_vk_gated_delta_net(ggml_backend_vk_context * ctx, vk_context& s
+     const vk_subbuffer a_buf  = raw_gates ? ggml_vk_tensor_subbuffer(ctx, dst->src[8]) : src_buf[4];
+ 
+     // the state CPY that follows becomes a no-op: build_graph skips it
+-    ctx->gdn_inplace_skip = nullptr;
+-    if (const ggml_tensor * cpy = ggml_vk_gdn_inplace_cpy(cgraph, node_idx)) {
++    const ggml_tensor * inplace_cpy = ggml_vk_gdn_inplace_cpy(cgraph, node_idx);
++    if (inplace_cpy) {
+         pc.state_inplace = 1;
+-        ctx->gdn_inplace_skip = cpy;
++        ctx->skip_nodes.push_back(inplace_cpy);
+     }
+ 
+     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+         {src_buf[0], src_buf[1], src_buf[2], src_buf[3], src_buf[4], src_buf[5], dst_buf, dt_buf, a_buf},
+         pc, { H, n_seqs, S_v });
++    if (inplace_cpy) {
++        // the state memory was written too; the skipped CPY would have recorded it
++        ctx->unsynced_nodes_written.push_back(inplace_cpy);
++    }
+ }
+ 
+ static void ggml_vk_ssm_scan(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+@@ -13424,6 +13451,92 @@ static void ggml_vk_ssm_scan(ggml_backend_vk_context * ctx, vk_context& subctx,
+         pc, elements);
+ }
+ 
++// Decode conv step: CONCAT(st = conv state, x^T) at node_idx, SSM_CONV(cat, w) + SILU, and CPY(view(cat, 1..3) ->
++// st memory). When st is only read by the CONCAT, the concat only feeds those two and real work follows, returns
++// true with the SSM_CONV, SILU and CPY nodes.
++static bool ggml_vk_can_conv_step(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx,
++                                  const ggml_tensor ** conv, const ggml_tensor ** silu, const ggml_tensor ** cpy) {
++    static const bool disabled = getenv("GGML_VK_DISABLE_CONV_STEP") != nullptr;
++    const ggml_tensor * cat = cgraph->nodes[node_idx];
++    if (disabled || ctx->device->pipeline_conv_step_f32 == nullptr || cat->op != GGML_OP_CONCAT ||
++        ggml_get_op_params_i32(cat, 0) != 0) {
++        return false;
++    }
++    const ggml_tensor * st = cat->src[0];
++    const ggml_tensor * x = cat->src[1];
++    if (st->type != GGML_TYPE_F32 || x->type != GGML_TYPE_F32 || cat->type != GGML_TYPE_F32 || !ggml_is_contiguous(st) ||
++        st->ne[0] != 3 || x->ne[0] != 1 || x->ne[1] != st->ne[1] || st->ne[2] != 1 || x->ne[2] != 1 ||
++        st->ne[3] != 1 || x->ne[3] != 1 || x->nb[1] % sizeof(float) != 0 || st->view_src == nullptr) {
++        return false;
++    }
++    const int cat_uses = ggml_node_get_use_count(cgraph, node_idx);
++    const int st_idx = ggml_vk_node_index(cgraph, st, 0);
++    if (cat_uses != 2 || (st_idx >= 0 && ggml_node_get_use_count(cgraph, st_idx) != 1)) {
++        return false;
++    }
++    *conv = *silu = *cpy = nullptr;
++    for (int j = node_idx + 1; j < cgraph->n_nodes && j <= node_idx + 48; j++) {
++        const ggml_tensor * n = cgraph->nodes[j];
++        if (n->op == GGML_OP_SSM_CONV && n->src[0] == cat && *conv == nullptr) {
++            const ggml_tensor * w = n->src[1];
++            if (j + 1 >= cgraph->n_nodes || w->type != GGML_TYPE_F32 || w->ne[0] != 4 || w->ne[1] != st->ne[1] ||
++                w->nb[0] != sizeof(float) || ggml_node_get_use_count(cgraph, j) != 1) {
++                return false;
++            }
++            const ggml_tensor * sl = cgraph->nodes[j + 1];
++            if (sl->op != GGML_OP_UNARY || ggml_get_unary_op(sl) != GGML_UNARY_OP_SILU || sl->src[0] != n ||
++                sl->type != GGML_TYPE_F32 || !ggml_is_contiguous(sl)) {
++                return false;
++            }
++            *conv = n;
++            *silu = sl;
++        } else if (n->op == GGML_OP_CPY && n->src[0]->view_src == cat && *cpy == nullptr) {
++            const ggml_tensor * v = n->src[0];
++            const int v_idx = ggml_vk_node_index(cgraph, v, node_idx);
++            if (v->view_offs != sizeof(float) || v->ne[0] != 3 || v->ne[1] != st->ne[1] || v_idx < 0 ||
++                ggml_node_get_use_count(cgraph, v_idx) != 1 || n->type != GGML_TYPE_F32 || !ggml_is_contiguous(n) ||
++                n->buffer != st->buffer || n->data != st->data || ggml_nbytes(n) != ggml_nbytes(st)) {
++                return false;
++            }
++            *cpy = n;
++        }
++        if (*conv && *cpy) {
++            const int last = std::max(ggml_vk_node_index(cgraph, *silu, node_idx), ggml_vk_node_index(cgraph, *cpy, node_idx));
++            return ggml_vk_has_later_work(cgraph, last);
++        }
++    }
++    return false;
++}
++
++static void ggml_vk_conv_step(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * cat,
++                              const ggml_tensor * conv, const ggml_tensor * silu, const ggml_tensor * cpy) {
++    const ggml_tensor * st = cat->src[0];
++    const ggml_tensor * x = cat->src[1];
++    const ggml_tensor * w = conv->src[1];
++    vk_pipeline pipeline = ctx->device->pipeline_conv_step_f32;
++    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
++
++    const uint32_t C = (uint32_t)st->ne[1];
++    const vk_op_conv_step_push_constants pc = {
++        C,
++        (uint32_t)(get_misalign_bytes(ctx, st) / sizeof(float)),
++        (uint32_t)(get_misalign_bytes(ctx, x) / sizeof(float)), (uint32_t)(x->nb[1] / sizeof(float)),
++        (uint32_t)(get_misalign_bytes(ctx, w) / sizeof(float)), (uint32_t)(w->nb[1] / sizeof(float)),
++        (uint32_t)(get_misalign_bytes(ctx, silu) / sizeof(float)),
++    };
++    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
++        { ggml_vk_tensor_subbuffer(ctx, st, true), ggml_vk_tensor_subbuffer(ctx, x, true),
++          ggml_vk_tensor_subbuffer(ctx, w, true), ggml_vk_tensor_subbuffer(ctx, silu, true) },
++        pc, { C, 1, 1 });
++
++    // what the skipped SSM_CONV+SILU and CPY would have written
++    ctx->unsynced_nodes_written.push_back(silu);
++    ctx->unsynced_nodes_written.push_back(cpy);
++    ctx->skip_nodes.push_back(conv);
++    ctx->skip_nodes.push_back(silu);
++    ctx->skip_nodes.push_back(cpy);
++}
++
+ static void ggml_vk_ssm_conv(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx) {
+     ggml_tensor * conv = cgraph->nodes[node_idx];
+     const ggml_tensor * src0 = conv->src[0];
+@@ -15860,6 +15973,13 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+     if ((node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+         return false;
+     }
++    if (!ctx->skip_nodes.empty() && !last_node) {
++        auto it = std::find(ctx->skip_nodes.begin(), ctx->skip_nodes.end(), node);
++        if (it != ctx->skip_nodes.end()) {
++            ctx->skip_nodes.erase(it);
++            return false;
++        }
++    }
+ 
+     VK_LOG_DEBUG("ggml_vk_build_graph(" << node << ", " << ggml_op_name(node->op) << ")");
+     ctx->semaphore_idx = 0;
+@@ -16045,6 +16165,13 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+ 
+         break;
+     case GGML_OP_CONCAT:
++        {
++            const ggml_tensor * conv, * silu, * cpy;
++            if (ggml_vk_can_conv_step(ctx, cgraph, node_idx, &conv, &silu, &cpy)) {
++                ggml_vk_conv_step(ctx, compute_ctx, node, conv, silu, cpy);
++                break;
++            }
++        }
+         ggml_vk_concat(ctx, compute_ctx, src0, src1, node);
+ 
+         break;
+@@ -16115,11 +16242,6 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+     case GGML_OP_CPY:
+     case GGML_OP_CONT:
+     case GGML_OP_DUP:
+-        if (node == ctx->gdn_inplace_skip) {
+-            // the GATED_DELTA_NET before already stored this state in place
+-            ctx->gdn_inplace_skip = nullptr;
+-            break;
+-        }
+         ggml_vk_cpy(ctx, compute_ctx, src0, node);
+ 
+         break;
+@@ -17660,6 +17782,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+     ctx->prealloc_size_add_rms_partials_offset = 0;
+     ctx->do_add_rms_partials = false;
+     ctx->do_add_rms_partials_offset_calculation = false;
++    ctx->skip_nodes.clear();
+ 
+     int last_node = cgraph->n_nodes - 1;
+ 
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/conv_step.comp b/ggml/src/ggml-vulkan/vulkan-shaders/conv_step.comp
+new file mode 100644
+index 0000000..3cb0fa0
+--- /dev/null
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/conv_step.comp
+@@ -0,0 +1,44 @@
++#version 450
++
++// Decode step of the gated-delta-net short convolution (kernel 4, one token): the CONCAT(conv state, x^T) ->
++// SSM_CONV -> SILU chain plus the CPY that writes the shifted window back over the conv state, in one dispatch.
++// One invocation per channel reads its 3-value window and the new input, writes silu(dot(window, w)) (the same
++// arithmetic as ssm_conv.comp with APPLY_SILU) and shifts the window in place.
++
++layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
++
++layout(push_constant) uniform parameter
++{
++    uint C;
++    uint st_off;    // element offsets / strides
++    uint x_off;
++    uint x_stride;
++    uint w_off;
++    uint w_stride;
++    uint d_off;
++};
++
++layout(binding = 0, std430) buffer St { float data_st[]; };
++layout(binding = 1, std430) readonly buffer X { float data_x[]; };
++layout(binding = 2, std430) readonly buffer W { float data_w[]; };
++layout(binding = 3, std430) writeonly buffer D { float data_d[]; };
++
++void main() {
++    const uint c = gl_GlobalInvocationID.x;
++    if (c >= C) {
++        return;
++    }
++    const uint s = st_off + 3 * c;
++    const float s0 = data_st[s];
++    const float s1 = data_st[s + 1];
++    const float s2 = data_st[s + 2];
++    const float x = data_x[x_off + c * x_stride];
++    const uint wb = w_off + c * w_stride;
++
++    const float sum = dot(vec4(s0, s1, s2, x), vec4(data_w[wb], data_w[wb + 1], data_w[wb + 2], data_w[wb + 3]));
++    data_d[d_off + c] = sum / (1.0f + exp(-sum));
++
++    data_st[s] = s1;
++    data_st[s + 1] = s2;
++    data_st[s + 2] = x;
++}
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 7f0341d..d734211 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -1167,6 +1167,7 @@ void process_shaders() {
+     string_to_spv("ssm_scan_subgroup_f32", "ssm_scan.comp", {{"A_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}});
+ 
+     string_to_spv("ssm_conv_f32", "ssm_conv.comp", {{"A_TYPE", "float"}});
++    string_to_spv("conv_step_f32", "conv_step.comp", {});
+ 
+     string_to_spv("topk_moe_f32", "topk_moe.comp", {});
+ 
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index c4a2b58..d7bc7b8 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -4974,6 +4974,47 @@ struct test_gdn_inplace : public test_case {
+     }
+ };
+ 
++// decode step of the gated-delta-net short convolution: CONCAT(conv state row, x^T), SSM_CONV + SILU and the
++// shifted window copied back over the state row, the shape the Vulkan backend runs as one conv_step dispatch
++struct test_conv_step : public test_case {
++    const int64_t C;
++
++    test_conv_step(int64_t C = 10240) : C(C) {}
++
++    std::string vars() override {
++        return VARS_TO_STR1(C);
++    }
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "CONV_STEP";
++    }
++
++    bool run_whole_graph() override { return true; }
++
++    ggml_tensor * silu_out = nullptr;
++    ggml_tensor * cache_out = nullptr;
++
++    std::vector<ggml_tensor *> fusion_test_nodes() override {
++        return { silu_out, cache_out };
++    }
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * cache = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 3 * C, 3);
++        ggml_set_name(cache, "cache");
++        ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, C, 1);
++        ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 4, C);
++        ggml_tensor * st = ggml_reshape_3d(ctx, ggml_view_2d(ctx, cache, 3 * C, 1, cache->nb[1], cache->nb[1]), 3, C, 1);
++        ggml_tensor * cat = ggml_concat(ctx, st, ggml_transpose(ctx, x), 0);
++        silu_out = ggml_silu(ctx, ggml_ssm_conv(ctx, cat, w));
++        ggml_tensor * last = ggml_view_3d(ctx, cat, 3, C, 1, cat->nb[1], cat->nb[2], ggml_row_size(cat->type, 1));
++        cache_out = ggml_cpy(ctx, last, ggml_view_2d(ctx, cache, 3 * C, 1, cache->nb[1], cache->nb[1]));
++        ggml_tensor * out = ggml_add(ctx, ggml_sum(ctx, silu_out), ggml_sum(ctx, cache_out));
++        ggml_set_name(out, "out");
++        return out;
++    }
++};
++
+ static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats) {
+     std::random_device rd;
+     std::default_random_engine rng(rd());
+@@ -9494,6 +9535,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     for (int64_t nt : {1, 4}) {
+         test_cases.emplace_back(new test_gdn_inplace(nt));
+     }
++    test_cases.emplace_back(new test_conv_step(10240));
++    test_cases.emplace_back(new test_conv_step(100));
+     for (bool mmvq : {false, true}) {
+         for (int64_t nt : {1, 3}) {
+             test_cases.emplace_back(new test_glu_fwht(17408, nt, mmvq));
+-- 
+2.53.0
+

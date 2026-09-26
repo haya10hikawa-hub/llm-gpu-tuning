@@ -1,0 +1,189 @@
+From 46f4add16842a6e4c861553ae388b5e5dd3db9de Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 09:54:41 +0000
+Subject: [PATCH 14/34] Bonsai decode launch cuts: raw GDN gates on Vulkan,
+ MUL_FWHT exact aliasing, no-op ssm_out reshape
+
+- gated_delta_net.comp applies sigmoid(beta) and a*softplus(g+dt) itself (RAW_GATES), so qwen35 drops four
+  elementwise ops per GDN layer on Vulkan (GGML_GDN_RAW_GATES_DISABLE=1 restores them)
+- MUL_FWHT accepts exact src==dst aliasing (whole row in registers before any store); the allocator had been
+  placing the ssm_out rotation that way, silently cancelling 48 of the fusions
+- skip the no-op reshape after ssm_out so the residual ADD fuses into the mat-vec
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp          | 38 +++++++++++--------
+ .../vulkan-shaders/gated_delta_net.comp       | 16 +++++++-
+ src/models/qwen35.cpp                         | 12 ++++--
+ 3 files changed, 46 insertions(+), 20 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index cb42301..7c4c0b5 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1084,7 +1084,7 @@ struct vk_device_struct {
+     vk_pipeline pipeline_rwkv_wkv7_f32;
+     vk_pipeline pipeline_gated_linear_attn_f32;
+     // [size_idx][kda] where size_idx: 0=d16, 1=d32, 2=d64, 3=d128
+-    vk_pipeline pipeline_gated_delta_net[4][2];
++    vk_pipeline pipeline_gated_delta_net[4][2][2]; // [S_v][kda][raw gates]
+     vk_pipeline pipeline_ssm_scan_f32_d128;
+     vk_pipeline pipeline_ssm_scan_f32_d256;
+     vk_pipeline pipeline_ssm_conv_f32;
+@@ -5990,9 +5990,11 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+             const std::array<uint32_t, 3> wg_denoms = {1u, 1u, cols_per_wg};
+ 
+             for (uint32_t kda = 0; kda < 2; kda++) {
+-                ggml_vk_create_pipeline(device, device->pipeline_gated_delta_net[si][kda],
+-                    gdn_names[si][kda], gdn_len, gdn_data, "main", 7, sizeof(vk_op_gated_delta_net_push_constants),
+-                    wg_denoms, {S_V, kda, device->subgroup_size, lanes_per_column}, 1, true, use_subgroup_ops, device->subgroup_size);
++                for (uint32_t raw = 0; raw < 2; raw++) {
++                    ggml_vk_create_pipeline(device, device->pipeline_gated_delta_net[si][kda][raw],
++                        (std::string(gdn_names[si][kda]) + (raw ? "_raw" : "")).c_str(), gdn_len, gdn_data, "main", 9, sizeof(vk_op_gated_delta_net_push_constants),
++                        wg_denoms, {S_V, kda, device->subgroup_size, lanes_per_column, raw}, 1, true, use_subgroup_ops, device->subgroup_size);
++                }
+             }
+         }
+     }
+@@ -11929,7 +11931,7 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const
+                 case 128: si = 3; break;
+                 default: return nullptr;
+             }
+-            return ctx->device->pipeline_gated_delta_net[si][kda];
++            return ctx->device->pipeline_gated_delta_net[si][kda][ggml_get_op_params_i32(dst, 1) != 0 ? 1 : 0];
+         }
+         return nullptr;
+     case GGML_OP_SSM_SCAN:
+@@ -13044,8 +13046,13 @@ static void ggml_vk_gated_delta_net(ggml_backend_vk_context * ctx, vk_context& s
+         K
+     };
+ 
++    // raw gates bind dt_bias (src[7]) and a (src[8]); otherwise those bindings are unused placeholders
++    const bool raw_gates = ggml_get_op_params_i32(dst, 1) != 0;
++    const vk_subbuffer dt_buf = raw_gates ? ggml_vk_tensor_subbuffer(ctx, dst->src[7]) : src_buf[4];
++    const vk_subbuffer a_buf  = raw_gates ? ggml_vk_tensor_subbuffer(ctx, dst->src[8]) : src_buf[4];
++
+     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+-        {src_buf[0], src_buf[1], src_buf[2], src_buf[3], src_buf[4], src_buf[5], dst_buf},
++        {src_buf[0], src_buf[1], src_buf[2], src_buf[3], src_buf[4], src_buf[5], dst_buf, dt_buf, a_buf},
+         pc, { H, n_seqs, S_v });
+ }
+ 
+@@ -17478,8 +17485,9 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 ctx->num_additional_fused_ops = 2;
+                 ctx->fused_mul_fwht = true;
+                 fusion_string = "MUL_FWHT";
+-                // each output row reads a whole input row, so the sources must not alias the output
+-                std::fill_n(op_srcs_fused_elementwise, 3, false);
++                // fwht_row loads each whole row into registers before any store and one workgroup owns a row,
++                // so exact src == dst aliasing is safe; partial overlap is still rejected by the check below
++                std::fill_n(op_srcs_fused_elementwise, 3, true);
+             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_ADD, GGML_OP_ADD })) {
+                 ctx->num_additional_fused_ops = 2;
+                 fusion_string = "MUL_MAT_ADD_ADD";
+@@ -18810,14 +18818,14 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
+                 if (op->src[6] != nullptr) {
+                     return false;
+                 }
+-                // raw gates (ggml_gated_delta_net_set_raw_gates): beta and g arrive
+-                // pre-activation and need beta = sigmoid(beta) and
+-                // g = a * softplus(g + dt_bias), with dt_bias in src[7] and a in src[8].
+-                // gated_delta_net.comp has neither those bindings nor that math - it
+-                // applies exp(g) unconditionally - so the shader silently returns wrong
+-                // results for this case. Decline it and let it fall back to the CPU.
++                // raw gates (ggml_gated_delta_net_set_raw_gates): gated_delta_net.comp applies
++                // beta = sigmoid(beta) and g = a * softplus(g + dt_bias) itself (RAW_GATES)
+                 if (ggml_get_op_params_i32(op, 1) != 0) {
+-                    return false;
++                    for (int i = 7; i <= 8; i++) {
++                        if (op->src[i] == nullptr || op->src[i]->type != GGML_TYPE_F32 || !ggml_is_contiguous(op->src[i])) {
++                            return false;
++                        }
++                    }
+                 }
+                 const uint32_t S_v = op->src[2]->ne[0];
+                 if (S_v != 16 && S_v != 32 && S_v != 64 && S_v != 128) {
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp b/ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp
+index 0e38433..59bc0e9 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp
+@@ -15,6 +15,8 @@ layout(constant_id = 0) const uint S_V = 128;
+ layout(constant_id = 1) const uint KDA = 0;
+ layout(constant_id = 2) const uint SUBGROUP_SIZE = 32;
+ layout(constant_id = 3) const uint LANES_PER_COLUMN = 32;
++// raw gates (ggml_gated_delta_net_set_raw_gates): beta and g arrive pre-activation, dt_bias and a per v-head
++layout(constant_id = 4) const uint RAW_GATES = 0;
+ 
+ const uint COLS_PER_WG = SUBGROUP_SIZE / LANES_PER_COLUMN;
+ const uint ROWS_PER_LANE = S_V / LANES_PER_COLUMN;
+@@ -41,6 +43,8 @@ layout(binding = 3) readonly  buffer GBuf     { FLOAT_TYPE data_g[];     };
+ layout(binding = 4) readonly  buffer BetaBuf  { FLOAT_TYPE data_beta[];  };
+ layout(binding = 5) readonly  buffer StateBuf { FLOAT_TYPE data_state[]; };
+ layout(binding = 6)           buffer DstBuf   { FLOAT_TYPE data_dst[];   };
++layout(binding = 7) readonly  buffer DtBuf    { FLOAT_TYPE data_dt[];    };
++layout(binding = 8) readonly  buffer ABuf     { FLOAT_TYPE data_ga[];    };
+ 
+ #if !USE_SUBGROUP_ADD && !USE_SUBGROUP_CLUSTERED
+ shared FLOAT_TYPE temp[SUBGROUP_SIZE];
+@@ -123,7 +127,10 @@ void main() {
+         const uint k_off = q_off;
+         const uint v_off = seq_id * sv3 + t * sv2 + head_id * sv1;
+         const uint gb_off = seq_id * sb3 + t * sb2 + head_id * sb1;
+-        const FLOAT_TYPE beta_val = FLOAT_TYPE(data_beta[gb_off]);
++        FLOAT_TYPE beta_val = FLOAT_TYPE(data_beta[gb_off]);
++        if (RAW_GATES != 0) {
++            beta_val = FLOAT_TYPE(1.0) / (FLOAT_TYPE(1.0) + exp(-beta_val));
++        }
+ 
+         FLOAT_TYPE k_reg[ROWS_PER_LANE];
+         FLOAT_TYPE q_reg[ROWS_PER_LANE];
+@@ -135,7 +142,12 @@ void main() {
+ 
+         FLOAT_TYPE g_exp[ROWS_PER_LANE];
+         if (KDA == 0) {
+-            const FLOAT_TYPE g_val = exp(FLOAT_TYPE(data_g[gb_off]));
++            FLOAT_TYPE g = FLOAT_TYPE(data_g[gb_off]);
++            if (RAW_GATES != 0) {
++                const FLOAT_TYPE x = g + FLOAT_TYPE(data_dt[head_id]);
++                g = FLOAT_TYPE(data_ga[head_id]) * (x > FLOAT_TYPE(20.0) ? x : log(FLOAT_TYPE(1.0) + exp(x)));
++            }
++            const FLOAT_TYPE g_val = exp(g);
+             [[unroll]] for (uint r = 0; r < ROWS_PER_LANE; r++) {
+                 g_exp[r] = g_val;
+             }
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index 1c164f8..3892bf9 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -159,10 +159,13 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
+         if (is_gpu && strcmp(reg_name, "MTL") != 0) {
+             gdn_state_rows_dev_ok = false;
+         }
+-        if (strcmp(reg_name, "MTL") != 0 && strcmp(reg_name, "CUDA") != 0 &&
++        if (strcmp(reg_name, "MTL") != 0 && strcmp(reg_name, "CUDA") != 0 && strcmp(reg_name, "Vulkan") != 0 &&
+             strcmp(reg_name, "ROCm") != 0 && strcmp(reg_name, "MUSA") != 0 && strcmp(reg_name, "CPU") != 0) {
+             gdn_raw_gates_dev_ok = false;
+         }
++        if (getenv("GGML_GDN_RAW_GATES_DISABLE") != nullptr) {
++            gdn_raw_gates_dev_ok = false;
++        }
+     }
+ 
+     int sections[4];
+@@ -576,8 +579,11 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
+     cur = build_lora_mm(model.layers[il].ssm_out, final_output, model.layers[il].ssm_out_s);
+     cb(cur, "linear_attn_out", il);
+ 
+-    // Reshape back to original dimensions
+-    cur = ggml_reshape_2d(ctx0, cur, n_embd, n_seq_tokens * n_seqs);
++    // Reshape back to original dimensions (a no-op RESHAPE node would sit between the mat-vec and the residual
++    // ADD and block their fusion, so only add it when the shape actually changes)
++    if (cur->ne[2] * cur->ne[3] != 1) {
++        cur = ggml_reshape_2d(ctx0, cur, n_embd, n_seq_tokens * n_seqs);
++    }
+ 
+     return cur;
+ }
+-- 
+2.53.0
+

@@ -1,0 +1,33 @@
+From 332ee2415ef1383544484a28b719e34e63a27014 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Sat, 26 Sep 2026 10:12:08 +0000
+Subject: [PATCH 31/34] vulkan: allow split_k for a single narrow m-tile when
+ there are several n-tiles (GDN alpha/beta at prefill)
+
+m=48 was excluded by m >= BM, leaving 16 workgroups for the whole GPU. Prefill +1-1.5%. GGML_VK_NO_NARROW_M_SPLIT_K restores the old rule.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index a634974..7cae6cc 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -9008,7 +9008,11 @@ static uint32_t ggml_vk_guess_split_k(ggml_backend_vk_context * ctx, uint32_t m,
+     }
+ 
+     uint32_t split_k = 1;
+-    if (ctx->device->shader_core_count != 0 && m >= pipeline->wg_denoms[0] && n >= pipeline->wg_denoms[1]) {
++    // a narrow m (e.g. the 48-row GDN alpha/beta projections at prefill: 1 m-tile x n/BN tiles) leaves most of the
++    // GPU idle without split_k, so a single m-tile also qualifies when there are several n-tiles
++    static const bool narrow_m = getenv("GGML_VK_NO_NARROW_M_SPLIT_K") == nullptr;
++    const bool m_ok = m >= pipeline->wg_denoms[0] || (narrow_m && n >= 4 * pipeline->wg_denoms[1]);
++    if (ctx->device->shader_core_count != 0 && m_ok && n >= pipeline->wg_denoms[1]) {
+         // If k is 'large' and the SMs will fill less than halfway, use split_k.
+         uint32_t m_tiles = CEIL_DIV(m, pipeline->wg_denoms[0]);
+         uint32_t n_tiles = CEIL_DIV(n, pipeline->wg_denoms[1]);
+-- 
+2.53.0
+

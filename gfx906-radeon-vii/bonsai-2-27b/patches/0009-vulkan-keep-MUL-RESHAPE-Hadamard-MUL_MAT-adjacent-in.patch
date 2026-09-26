@@ -1,0 +1,51 @@
+From 03ba46ab14b9594a1b37f55185be88a5621b5958 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 07:02:11 +0000
+Subject: [PATCH 09/34] vulkan: keep {MUL, RESHAPE, Hadamard MUL_MAT} adjacent
+ in graph_optimize so MUL_FWHT fuses
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 4cac40c..7a1ee51 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -17802,6 +17802,12 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+             return false;
+         };
+ 
++        // sign flip + reshape + Hadamard-hinted matmul: fused into one FWHT dispatch (ggml_vk_can_fuse_mul_fwht)
++        static constexpr std::initializer_list<ggml_op> mul_fwht_pattern { GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT };
++        auto const &is_mul_fwht = [&](int start) -> bool {
++            return match_pattern(mul_fwht_pattern, start) &&
++                   ggml_get_op_params_i32(graph->nodes[start + 2], 1) == GGML_HINT_SRC0_IS_HADAMARD;
++        };
+         auto const &keep_pattern = [&](const std::initializer_list<ggml_op> &pattern) -> bool {
+             if (match_pattern(pattern, first_unused)) {
+                 for (size_t j = 0; j < pattern.size(); ++j) {
+@@ -17835,6 +17841,9 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+         if (keep_pattern(snake_pattern)) {
+             continue;
+         }
++        if (is_mul_fwht(first_unused) && keep_pattern(mul_fwht_pattern)) {
++            continue;
++        }
+ 
+         // First, grab the next unused node.
+         current_set.push_back(first_unused);
+@@ -17859,7 +17868,8 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+                 match_pattern(topk_moe_sqrt_softplus_norm_bias, j) ||
+                 match_pattern(topk_moe_early_softmax, j) ||
+                 match_pattern(topk_moe_late_softmax, j) ||
+-                match_pattern(snake_pattern, j)) {
++                match_pattern(snake_pattern, j) ||
++                is_mul_fwht(j)) {
+                 continue;
+             }
+             bool ok = true;
+-- 
+2.53.0
+

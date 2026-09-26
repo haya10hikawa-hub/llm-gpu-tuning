@@ -1,0 +1,43 @@
+From c276b4d71ae9244c698de2c807fc75c6f2917cf1 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 07:54:13 +0000
+Subject: [PATCH 11/34] vulkan: MUL_FWHT: explicit chain check (ggml_can_fuse
+ rejects the RESHAPE view and the shape change)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 2c2a260..57e64f8 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -10171,13 +10171,22 @@ static void ggml_vk_fwht_row(ggml_backend_vk_context * ctx, vk_context& subctx,
+ // {MUL(x, signs), RESHAPE, MUL_MAT(rot, .) with the Hadamard hint} -> one fwht_row_signed dispatch
+ static bool ggml_vk_can_fuse_mul_fwht(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
+     static const bool disabled = getenv("GGML_VK_DISABLE_MUL_FWHT") != nullptr;
+-    if (disabled || !ggml_can_fuse(cgraph, node_idx, { GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT })) {
++    if (disabled || node_idx + 2 >= cgraph->n_nodes) {
+         return false;
+     }
+     const ggml_tensor * mul = cgraph->nodes[node_idx];
+     const ggml_tensor * rs  = cgraph->nodes[node_idx + 1];
+     const ggml_tensor * mm  = cgraph->nodes[node_idx + 2];
+-    if (ggml_get_op_params_i32(mm, 1) != GGML_HINT_SRC0_IS_HADAMARD || mm->src[1] != rs || rs->src[0] != mul) {
++    if (mul->op != GGML_OP_MUL || rs->op != GGML_OP_RESHAPE || mm->op != GGML_OP_MUL_MAT) {
++        return false;
++    }
++    if (ggml_get_op_params_i32(mm, 1) != GGML_HINT_SRC0_IS_HADAMARD || mm->src[1] != rs || rs->src[0] != mul || rs->view_src != mul) {
++        return false;
++    }
++    // the sign-flipped tensor and its reshape must not be needed by anyone else
++    if (ggml_node_get_use_count(cgraph, node_idx) != 1 || ggml_node_get_use_count(cgraph, node_idx + 1) != 1 ||
++        (mul->flags & GGML_TENSOR_FLAG_OUTPUT) || (rs->flags & GGML_TENSOR_FLAG_OUTPUT) ||
++        !(mul->flags & GGML_TENSOR_FLAG_COMPUTE) || !(mm->flags & GGML_TENSOR_FLAG_COMPUTE)) {
+         return false;
+     }
+     const ggml_tensor * x = mul->src[0];
+-- 
+2.53.0
+

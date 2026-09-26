@@ -1,0 +1,119 @@
+From 9029b9a40e283a1331cb490c830e04b91752d416 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Sat, 26 Sep 2026 06:16:16 +0000
+Subject: [PATCH 25/34] vulkan: PQ2_0 MMQ tile override knobs
+ (GGML_VK_PQ2_MMQ_L/_M/_S, _TILE); tests: Bonsai prefill MMQ perf shapes
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 57 +++++++++++++++++++++++++++-
+ tests/test-backend-ops.cpp           |  4 ++
+ 2 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index b1db069..4d0c5c9 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -4675,6 +4675,45 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     }
+ #endif
+ 
++    // PQ2_0 integer MMQ tiles: copies of the int ones, overridable for tuning (GGML_VK_PQ2_MMQ_L/_M/_S)
++    std::array<uint32_t, 3> l_pq2_mmq_wg_denoms = l_mmq_wg_denoms, m_pq2_mmq_wg_denoms = m_mmq_wg_denoms,
++                          s_pq2_mmq_wg_denoms = s_mmq_wg_denoms;
++    std::vector<uint32_t> l_warptile_mmq_int_pq2 = l_warptile_mmq_int, m_warptile_mmq_int_pq2 = m_warptile_mmq_int,
++                          s_warptile_mmq_int_pq2 = s_warptile_mmq_int;
++    {
++        auto const &override_tile = [](const char * var, std::vector<uint32_t> & wt, std::array<uint32_t, 3> & denoms) {
++            const char * v = getenv(var);
++            if (v == nullptr) {
++                return;
++            }
++            std::vector<uint32_t> vals;
++            for (const char * c = v; *c; ) {
++                vals.push_back((uint32_t)strtoul(c, (char **)&c, 10));
++                if (*c == ',') {
++                    c++;
++                }
++            }
++            if (vals.size() != 11) {
++                std::cerr << "ggml_vulkan: " << var << " needs 11 comma-separated values, ignored" << std::endl;
++                return;
++            }
++            wt = vals;
++            denoms = { vals[1], vals[2], 1 };
++            std::cerr << "ggml_vulkan: " << var << " = " << v << std::endl;
++        };
++        override_tile("GGML_VK_PQ2_MMQ_L", l_warptile_mmq_int_pq2, l_pq2_mmq_wg_denoms);
++        override_tile("GGML_VK_PQ2_MMQ_M", m_warptile_mmq_int_pq2, m_pq2_mmq_wg_denoms);
++        override_tile("GGML_VK_PQ2_MMQ_S", s_warptile_mmq_int_pq2, s_pq2_mmq_wg_denoms);
++        const ggml_type t = GGML_TYPE_PQ2_0;
++        if (getenv("GGML_VK_PQ2_MMQ_L") || getenv("GGML_VK_PQ2_MMQ_M") || getenv("GGML_VK_PQ2_MMQ_S")) {
++            device->mul_mat_s_int[t] = ggml_vk_matmul_int_shmem_support(device, s_warptile_mmq_int_pq2, false, t);
++            device->mul_mat_m_int[t] = device->mul_mat_s_int[t] && ggml_vk_matmul_int_shmem_support(device, m_warptile_mmq_int_pq2, false, t);
++            device->mul_mat_l_int[t] = device->mul_mat_m_int[t] && ggml_vk_matmul_int_shmem_support(device, l_warptile_mmq_int_pq2, false, t);
++            std::cerr << "ggml_vulkan: PQ2_0 MMQ tiles s/m/l enabled: " << device->mul_mat_s_int[t] << device->mul_mat_m_int[t]
++                      << device->mul_mat_l_int[t] << std::endl;
++        }
++    }
++
+     auto const &ggml_vk_mul_mm_spec = [&device](std::vector<uint32_t> spec, bool aligned) {
+         spec.push_back(aligned ? 1u : 0u);  // constantID=11: ALIGNED
+         if (device->vendor_id == VK_VENDOR_ID_INTEL && device->coopmat_support &&
+@@ -5008,7 +5047,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+         if (device->integer_dot_product) {
+             CREATE_MMQ(GGML_TYPE_Q2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q2_0], matmul_q2_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
+-            CREATE_MMQ(GGML_TYPE_PQ2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_PQ2_0], matmul_pq2_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
++            CREATE_MMQ(GGML_TYPE_PQ2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_PQ2_0], matmul_pq2_0_q8_1, pq2_mmq_wg_denoms, warptile_mmq_int_pq2, vk_mat_mat_push_constants, 3, , 0);
+             CREATE_MMQ(GGML_TYPE_Q4_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q4_0], matmul_q4_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
+             CREATE_MMQ(GGML_TYPE_Q4_1, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q4_1], matmul_q4_1_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
+             CREATE_MMQ(GGML_TYPE_Q5_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q5_0], matmul_q5_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, , 0);
+@@ -5192,7 +5231,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+         if (device->integer_dot_product) {
+             CREATE_MMQ(GGML_TYPE_Q2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q2_0].f32acc, matmul_q2_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
+-            CREATE_MMQ(GGML_TYPE_PQ2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_PQ2_0].f32acc, matmul_pq2_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
++            CREATE_MMQ(GGML_TYPE_PQ2_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_PQ2_0].f32acc, matmul_pq2_0_q8_1, pq2_mmq_wg_denoms, warptile_mmq_int_pq2, vk_mat_mat_push_constants, 3, );
+             CREATE_MMQ(GGML_TYPE_Q4_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q4_0].f32acc, matmul_q4_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
+             CREATE_MMQ(GGML_TYPE_Q4_1, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q4_1].f32acc, matmul_q4_1_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
+             CREATE_MMQ(GGML_TYPE_Q5_0, pipeline_dequant_mul_mat_mat_q8_1[GGML_TYPE_Q5_0].f32acc, matmul_q5_0_q8_1, mmq_wg_denoms, warptile_mmq_int, vk_mat_mat_push_constants, 3, );
+@@ -9013,6 +9052,20 @@ static vk_pipeline ggml_vk_guess_matmul_pipeline(ggml_backend_vk_context * ctx,
+         return aligned ? mmp->a_s : mmp->s;
+     }
+ 
++    if (is_q8_1 && src0_type == GGML_TYPE_PQ2_0) {
++        static const char * force = getenv("GGML_VK_PQ2_MMQ_TILE");
++        if (force != nullptr) {
++            if (force[0] == 'l' && mm_l) {
++                return aligned ? mmp->a_l : mmp->l;
++            }
++            if (force[0] == 'm' && mm_m) {
++                return aligned ? mmp->a_m : mmp->m;
++            }
++            if (force[0] == 's' && mm_s) {
++                return aligned ? mmp->a_s : mmp->s;
++            }
++        }
++    }
+     if ((mm_s && (m <= 32 || n <= 32)) || (!mm_m && !mm_l)) {
+         return aligned ? mmp->a_s : mmp->s;
+     }
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 2ea3d01..f62cebc 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -10673,6 +10673,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+             }
+         }
+         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PQ2_0, GGML_TYPE_F32, 248320, 1, 5120, {1, 1}, {1, 1}));
++        // prefill (ub = 256) shapes: the PQ2_0 integer MMQ
++        for (auto [m, k] : shapes) {
++            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PQ2_0, GGML_TYPE_F32, m, 256, k, {1, 1}, {1, 1}));
++        }
+         // FWHT at the decode shapes of Bonsai 2 27B (rows = width / 1024 per token), plain and with the sign flip
+         for (int64_t rows : {5, 6, 17}) {
+             test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, 1024, rows, 1024));
+-- 
+2.53.0
+

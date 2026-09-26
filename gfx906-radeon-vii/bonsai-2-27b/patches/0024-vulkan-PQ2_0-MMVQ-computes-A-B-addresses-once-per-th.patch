@@ -1,0 +1,133 @@
+From da13a64d9e8417c4623682b00c69ce82456fe4e0 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 13:18:17 +0000
+Subject: [PATCH 24/34] vulkan: PQ2_0 MMVQ computes A/B addresses once per
+ thread and row
+
+ACO spent about half of the ~30 VALU per 16 weights and row of the generic iter() on re-deriving block indices
+(divide by 32, 34-byte block multiply, alignment fix-up) for every load. The PQ2_0 path now computes each
+thread starting u16 / dword / uvec4 indices once and advances them by constants, which fold into the load
+immediates in the unrolled loop. Same dot products, order and scale arithmetic: bit-identical results.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ .../vulkan-shaders/mul_mat_vecq.comp          | 96 +++++++++++++++++++
+ 1 file changed, 96 insertions(+)
+
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp
+index 39774f2..3eca25d 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq.comp
+@@ -28,6 +28,100 @@ vec2 cache_b_ds;
+ 
+ #include "mul_mat_vecq_funcs.glsl"
+ 
++#if defined(DATA_A_PQ2_0)
++// PQ2_0 path: addresses computed once per thread and row, then advanced by constants (see pq2 notes above main)
++layout (binding = 0) readonly buffer A_PQ2_U16 { uint16_t data_a_u16[]; };
++layout (binding = 1) readonly buffer B_Q81_U32 { uint32_t data_b_u32[]; };
++layout (binding = 1) readonly buffer B_Q81_V4 { uvec4 data_b_v4[]; };
++
++// one k step (16 values) for every row and column; a is the u16 index of this thread's PQ2_0 block in row 0,
++// bq / bd the uvec4 index of its 16 q8_1 bytes and the dword index of their (d, d*sum) per column
++void iter_pq2(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint num_rows, const uint a, const uint row_u16,
++              const uint q_in, const uint bq[NUM_COLS], const uint bd[NUM_COLS]) {
++    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
++        const vec2 ds = unpackHalf2x16(data_b_u32[bd[j]]);
++        const ivec4 b = ivec4(data_b_v4[bq[j]]);
++        [[unroll]] for (uint n = 0; n < num_rows; ++n) {
++            const uint ai = a + n * row_u16;
++            const uint bits = pack32(u16vec2(data_a_u16[ai + q_in], data_a_u16[ai + q_in + 1]));
++            int32_t q_sum = dotPacked4x8EXT(int32_t(bits & 0x03030303u), b.x);
++            q_sum += dotPacked4x8EXT(int32_t((bits >> 2u) & 0x03030303u), b.y);
++            q_sum += dotPacked4x8EXT(int32_t((bits >> 4u) & 0x03030303u), b.z);
++            q_sum += dotPacked4x8EXT(int32_t((bits >> 6u) & 0x03030303u), b.w);
++            temp[j][n] += mul_q8_1(q_sum, unpackHalf2x16(uint(data_a_u16[ai])).x, ds, 2);
++        }
++    }
++}
++
++void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
++    const uint tid = gl_LocalInvocationID.x;
++
++    get_offsets(a_offset, b_offset, d_offset);
++    // a_offset counts PQ2_0 blocks (128 values), b_offset values
++    b_offset /= QUANT_K_Q8_1;
++
++    FLOAT_TYPE temp[NUM_COLS][NUM_ROWS];
++    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
++        [[unroll]] for (uint n = 0; n < num_rows; ++n) {
++            temp[j][n] = FLOAT_TYPE(0.0f);
++        }
++    }
++
++    const uint col_stride = K_PER_ITER * BLOCK_SIZE;
++    uint num_iters = p.ncols / col_stride;
++    if (num_iters * col_stride + K_PER_ITER * tid < p.ncols) {
++        num_iters++;
++    }
++
++    // thread tid reads values [16 tid, 16 tid + 16) of each col_stride: PQ2_0 block tid / 8 of the stride, its
++    // codes at u16 1 + 2 (tid % 8), its scale at u16 0 (a block is 17 u16)
++    const uint blocks_step = col_stride / QUANT_K;
++    const uint row_u16 = (p.ncols / QUANT_K) * 17;
++    const uint q_in = 1 + (tid % 8) * 2;
++    uint a = (first_row * (p.ncols / QUANT_K) + a_offset + tid / 8) * 17;
++    const uint a_step = blocks_step * 17;
++
++    // q8_1 block (32 values) tid / 2 of the stride, 16-value half tid % 2; a q8_1_x4 block is 9 uvec4 / 36 dwords
++    uint bq[NUM_COLS];
++    uint bd[NUM_COLS];
++    [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
++        const uint bb = (j * p.batch_stride_b) / QUANT_K_Q8_1 + b_offset + tid / 2;
++        bq[j] = (bb / 4) * 9 + 1 + (bb % 4) * 2 + (tid % 2);
++        bd[j] = (bb / 4) * 36 + (bb % 4);
++    }
++    const uint bq_step = blocks_step * 9;
++    const uint bd_step = blocks_step * 36;
++
++    while (num_iters >= 4) {
++        [[unroll]] for (uint k = 0; k < 4; ++k) {
++            uint bqk[NUM_COLS];
++            uint bdk[NUM_COLS];
++            [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
++                bqk[j] = bq[j] + k * bq_step;
++                bdk[j] = bd[j] + k * bd_step;
++            }
++            iter_pq2(temp, num_rows, a + k * a_step, row_u16, q_in, bqk, bdk);
++        }
++        a += 4 * a_step;
++        [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
++            bq[j] += 4 * bq_step;
++            bd[j] += 4 * bd_step;
++        }
++        num_iters -= 4;
++    }
++    while (num_iters > 0) {
++        iter_pq2(temp, num_rows, a, row_u16, q_in, bq, bd);
++        a += a_step;
++        [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
++            bq[j] += bq_step;
++            bd[j] += bd_step;
++        }
++        num_iters--;
++    }
++
++    reduce_result(temp, d_offset, first_row, num_rows, tid);
++}
++#else
+ void iter(inout FLOAT_TYPE temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint num_rows, const uint col, const uint b_qs_idx) {
+     [[unroll]] for (uint j = 0; j < NUM_COLS; ++j) {
+         // Preload data_b block
+@@ -122,6 +216,8 @@ void compute_outputs(const uint32_t first_row, const uint32_t num_rows) {
+     reduce_result(temp, d_offset, first_row, num_rows, tid);
+ }
+ 
++#endif
++
+ void main() {
+     const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+ 
+-- 
+2.53.0
+
