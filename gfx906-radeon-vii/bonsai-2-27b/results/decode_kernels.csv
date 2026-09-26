@@ -26,3 +26,11 @@ depth,op,launches_per_tok,us_per_launch,us_per_tok,pct
 32768,MUL_MAT_ADD MUL_MAT_VEC pq2_0 m=5120 k=17408,64.0,52.5,3362,9.6
 32768,GATED_DELTA_NET,48.0,17.9,860,2.5
 32768,TOTAL,2199,,34960,100
+4096 opt13 f16,PQ2_0 mat-vec total,401,29.5,11840,67.1
+4096 opt14 f16,PQ2_0 mat-vec total,401,27.2,10910,67.3
+4096 opt13 f16,FLASH_ATTN_EXT,16,71.9,1150,6.5
+4096 opt14 f16,FLASH_ATTN_EXT,16,56.8,910,5.6
+4096 opt13 f16,bf16 mat-vec (alpha/beta),96,8.8,840,4.8
+4096 opt14 f16,bf16 mat-vec (alpha/beta),96,6.0,570,3.5
+4096 opt13 f16,GPU total,1014,,17650,100
+4096 opt14 f16,GPU total,1014,,16200,100

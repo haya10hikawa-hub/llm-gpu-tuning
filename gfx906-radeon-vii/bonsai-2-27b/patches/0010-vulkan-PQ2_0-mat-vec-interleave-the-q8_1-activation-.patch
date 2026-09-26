@@ -1,7 +1,7 @@
 From b96222e3fca070e7403f8a646ea31c2c982dd8d3 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 07:17:33 +0000
-Subject: [PATCH 10/24] vulkan: PQ2_0 mat-vec: interleave the q8_1 activation
+Subject: [PATCH 10/34] vulkan: PQ2_0 mat-vec: interleave the q8_1 activation
  instead of unpacking 2-bit codes
 
 The mat-vec is instruction-bound on gfx906. (bits >> 2m) & 0x03030303 puts codes m, m+4, m+8, m+12 into byte

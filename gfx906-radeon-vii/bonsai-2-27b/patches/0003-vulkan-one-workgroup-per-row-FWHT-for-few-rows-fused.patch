@@ -1,7 +1,7 @@
 From 43448cd7a1cb20d3f737c48c10ff04d23b15e4d9 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 04:02:57 +0000
-Subject: [PATCH 03/24] vulkan: one-workgroup-per-row FWHT for few rows, fused
+Subject: [PATCH 03/34] vulkan: one-workgroup-per-row FWHT for few rows, fused
  with the preceding sign MUL
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

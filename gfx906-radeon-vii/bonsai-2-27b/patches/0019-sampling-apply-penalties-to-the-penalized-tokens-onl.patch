@@ -1,7 +1,7 @@
 From c9457d57718cee783965d081dc866d79dcac8df3 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 11:00:20 +0000
-Subject: [PATCH 19/24] sampling: apply penalties to the penalized tokens only
+Subject: [PATCH 19/34] sampling: apply penalties to the penalized tokens only
  when candidates are indexed by id
 
 One unordered_map lookup per candidate cost 2.9 ms per token for a 248k vocabulary (64-token window), with the

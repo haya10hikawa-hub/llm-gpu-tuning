@@ -1,0 +1,188 @@
+From a30fd6538d82cdf3950a755a12fc96a18a56c9a4 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Sat, 26 Sep 2026 06:49:37 +0000
+Subject: [PATCH 28/34] vulkan: GGML_VK_CPU_TIMING per-graph record/wait/gap
+ timing; sampling: top-k prefilter over raw logits when only penalties precede
+ top_k
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ common/sampling.cpp                  | 75 ++++++++++++++++++++++++++--
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 39 +++++++++++++++
+ 2 files changed, 109 insertions(+), 5 deletions(-)
+
+diff --git a/common/sampling.cpp b/common/sampling.cpp
+index 06dea1e..fc52858 100644
+--- a/common/sampling.cpp
++++ b/common/sampling.cpp
+@@ -127,7 +127,49 @@ struct common_sampler {
+         llama_sampler_reset(chain);
+     }
+ 
+-    void set_logits(struct llama_context * ctx, int idx) {
++    // number of raw-logit candidates that certainly contain the result of the samplers up to top_k, or 0 for all
++    size_t prefilter_keep() const {
++        static const bool disabled = getenv("GGML_SAMPLER_NO_PREFILTER") != nullptr;
++        if (disabled || rbudget != nullptr || params.mirostat != 0 || params.top_k <= 0) {
++            return 0;
++        }
++        if (params.penalty_repeat < 1.0f || params.penalty_freq < 0.0f || params.penalty_present < 0.0f) {
++            return 0;
++        }
++        size_t n_bias = 0;
++        for (const auto & lb : params.logit_bias) {
++            if (lb.bias > 0.0f) {
++                return 0;
++            }
++            n_bias++;
++        }
++        for (const auto & lb : params.logit_bias_eog) {
++            if (lb.bias > 0.0f) {
++                return 0;
++            }
++            n_bias++;
++        }
++        bool seen_top_k = false;
++        for (const auto & c : params.samplers) {
++            if (c == COMMON_SAMPLER_TYPE_TOP_K) {
++                seen_top_k = true;
++                break;
++            }
++            const bool lowers_only = c == COMMON_SAMPLER_TYPE_PENALTIES ||
++                                     (c == COMMON_SAMPLER_TYPE_DRY && params.dry_multiplier == 0.0f) ||
++                                     (c == COMMON_SAMPLER_TYPE_TOP_N_SIGMA && params.top_n_sigma <= 0.0f);
++            if (!lowers_only) {
++                return 0;
++            }
++        }
++        if (!seen_top_k) {
++            return 0;
++        }
++        const size_t n_pen = params.penalty_last_n != 0 ? (size_t)std::max(params.penalty_last_n, 0) : 0;
++        return (size_t)params.top_k + (params.penalty_last_n < 0 ? 4096 : n_pen) + n_bias;
++    }
++
++    void set_logits(struct llama_context * ctx, int idx, bool full = true) {
+         const float *       sampled_probs  = llama_get_sampled_probs_ith     (ctx, idx);
+         const float *       sampled_logits = llama_get_sampled_logits_ith    (ctx, idx);
+         const llama_token * sampled_ids    = llama_get_sampled_candidates_ith(ctx, idx);
+@@ -152,9 +194,32 @@ struct common_sampler {
+         } else {
+             const auto * logits = llama_get_logits_ith(ctx, idx);
+             GGML_ASSERT(logits != nullptr);
+-            cur.resize(n_vocab);
+-            for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+-                cur[token_id] = llama_token_data{token_id, logits[token_id], 0.0f};
++            const size_t keep = full ? 0 : prefilter_keep();
++            if (keep > 0 && keep * 16 < (size_t)n_vocab) {
++                // min-heap (by logit, then higher id first out) of the best `keep` raw logits
++                auto worse = [](const llama_token_data & a, const llama_token_data & b) {
++                    return a.logit > b.logit || (a.logit == b.logit && a.id < b.id);
++                };
++                cur.clear();
++                cur.reserve(keep);
++                for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
++                    const float l = logits[token_id];
++                    if (cur.size() < keep) {
++                        cur.push_back({token_id, l, 0.0f});
++                        std::push_heap(cur.begin(), cur.end(), worse);
++                    } else if (l > cur.front().logit) {
++                        std::pop_heap(cur.begin(), cur.end(), worse);
++                        cur.back() = {token_id, l, 0.0f};
++                        std::push_heap(cur.begin(), cur.end(), worse);
++                    }
++                }
++                // back to token-id order, as the full array would present them
++                std::sort(cur.begin(), cur.end(), [](const llama_token_data & a, const llama_token_data & b) { return a.id < b.id; });
++            } else {
++                cur.resize(n_vocab);
++                for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
++                    cur[token_id] = llama_token_data{token_id, logits[token_id], 0.0f};
++                }
+             }
+         }
+ 
+@@ -604,7 +669,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
+     auto & chain = gsmpl->chain;
+     auto & cur_p = gsmpl->cur_p; // initialized by set_logits
+ 
+-    gsmpl->set_logits(ctx, idx);
++    gsmpl->set_logits(ctx, idx, grammar_first && grammar_should_apply(gsmpl));
+ 
+     // Check if a backend sampler has already sampled a token in which case we
+     // return that token id directly.
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 7498d79..8dca92b 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -2677,6 +2677,24 @@ static VkDeviceSize ggml_vk_get_max_buffer_range(const ggml_backend_vk_context *
+ }
+ 
+ // Wait for ctx->fence to be signaled.
++// GGML_VK_CPU_TIMING=N: host-side timing of graph recording, final fence wait and the gap between graphs
++struct vk_cpu_timing {
++    int every = -1;   // -1: not read yet, 0: off
++    int n = 0;
++    uint64_t submits = 0;
++    double rec_ms = 0, wait_ms = 0, gap_ms = 0;
++    std::chrono::steady_clock::time_point last_exit {};
++    bool have_exit = false;
++    bool on() {
++        if (every < 0) {
++            const char * v = getenv("GGML_VK_CPU_TIMING");
++            every = v ? std::max(1, atoi(v)) : 0;
++        }
++        return every > 0;
++    }
++};
++static vk_cpu_timing vk_cpu_t;
++
+ static void ggml_vk_wait_for_fence(ggml_backend_vk_context * ctx) {
+     // Use waitForFences while most of the graph executes. Hopefully the CPU can sleep
+     // during this wait.
+@@ -17469,7 +17487,13 @@ static void ggml_vk_synchronize(ggml_backend_vk_context * ctx) {
+             ctx->device->compute_queue->handle->submit({}, ctx->fence);
+         }
+         if (!ctx->device->serialize_submissions) {
++            const auto tw = std::chrono::steady_clock::now();
+             ggml_vk_wait_for_fence(ctx);
++            if (vk_cpu_t.on()) {
++                vk_cpu_t.last_exit = std::chrono::steady_clock::now();
++                vk_cpu_t.have_exit = true;
++                vk_cpu_t.wait_ms += std::chrono::duration<double, std::milli>(vk_cpu_t.last_exit - tw).count();
++            }
+         }
+         ctx->submit_pending = false;
+         if (cmd_buf) {
+@@ -18055,6 +18079,10 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         vk_instance.pfn_vkQueueBeginDebugUtilsLabelEXT(ctx->device->compute_queue->handle->queue, reinterpret_cast<VkDebugUtilsLabelEXT*>(&dul));
+     }
+ 
++    const auto vk_cpu_t0 = std::chrono::steady_clock::now();
++    if (vk_cpu_t.on() && vk_cpu_t.have_exit) {
++        vk_cpu_t.gap_ms += std::chrono::duration<double, std::milli>(vk_cpu_t0 - vk_cpu_t.last_exit).count();
++    }
+     ctx->prealloc_size_add_rms_partials_offset = 0;
+     ctx->do_add_rms_partials = false;
+     ctx->do_add_rms_partials_offset_calculation = false;
+@@ -18483,6 +18511,17 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+     }
+ 
+     ctx->last_total_flops = total_flops;
++    if (vk_cpu_t.on()) {
++        vk_cpu_t.rec_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - vk_cpu_t0).count();
++        vk_cpu_t.submits += submit_count;
++        if (++vk_cpu_t.n % vk_cpu_t.every == 0) {
++            const double k = 1.0 / vk_cpu_t.every;
++            fprintf(stderr, "vk_cpu_timing: per graph rec %.3f ms (%.1f submits) | final wait %.3f ms | gap outside backend %.3f ms | nodes %d\n",
++                    vk_cpu_t.rec_ms * k, vk_cpu_t.submits * k, vk_cpu_t.wait_ms * k, vk_cpu_t.gap_ms * k, cgraph->n_nodes);
++            vk_cpu_t.rec_ms = vk_cpu_t.wait_ms = vk_cpu_t.gap_ms = 0;
++            vk_cpu_t.submits = 0;
++        }
++    }
+ 
+     if (vk_perf_logger_enabled) {
+         // End the command buffer and submit/wait
+-- 
+2.53.0
+

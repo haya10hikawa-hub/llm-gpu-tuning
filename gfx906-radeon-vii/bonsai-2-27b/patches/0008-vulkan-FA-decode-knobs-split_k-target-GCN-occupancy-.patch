@@ -1,7 +1,7 @@
 From 2e88b8ddb3879d6b834c0e6ea107827ec6d6b211 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 05:07:14 +0000
-Subject: [PATCH 08/24] vulkan: FA decode knobs (split_k target, GCN occupancy
+Subject: [PATCH 08/34] vulkan: FA decode knobs (split_k target, GCN occupancy
  limit); tests: decode-shape FA perf cases
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

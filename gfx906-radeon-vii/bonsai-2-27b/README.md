@@ -15,9 +15,9 @@ Qwen3.8-27B を三値 (ternary) で量子化認識学習したモデル。構造
 |---|---|---|---|---|
 | 当初 | 8.74 | | 59.6 | |
 | 環境変数のみ | 27.6 | 28.9 | 99.8 | 91.2 |
-| **パッチ + KV f16** | **47.2** | **48.6** | **250.1** | **221.1** |
+| **パッチ + KV f16 + ub 1024** | **約 54** | **約 48** | **284** | **256** |
 
-当初比で decode 5.4 倍、prefill 4.2 倍。パッチ前後で貪欲 128 トークンは一致し、
+当初比で decode 約 6 倍、prefill 4.8 倍 (32k 文脈の decode は約 45 t/s)。パッチ前後で貪欲 128 トークンは一致し、
 KL ダイバージェンスは decode 0.0010 / prefill 0.0038
 ([results/opt_e2e.csv](results/opt_e2e.csv), [results/kld.csv](results/kld.csv))。
 
@@ -31,7 +31,7 @@ cd <PrismML llama.cpp @842b188>
 git am <このディレクトリ>/patches/*.patch   # 任意。速度を上げるパッチ一式
 GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 GGML_VK_RM_KQ_INT=2 \
   llama-server -m models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
-    -ngl 99 -c 65536 --parallel 1 -ctk f16 -ctv f16 --jinja
+    -ngl 99 -c 65536 --parallel 1 -ctk f16 -ctv f16 -ub 1024 -b 2048 --jinja
 ```
 
 - **`GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1` は必須** (無いと 3.6 倍遅い。[docs/findings.md](docs/findings.md))

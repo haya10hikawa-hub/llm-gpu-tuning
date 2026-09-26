@@ -1,7 +1,7 @@
 From 9328e8191df24a00a873af610d7e33dc3b8ebc5b Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 04:02:58 +0000
-Subject: [PATCH 05/24] graph: view instead of GET_ROWS for identity
+Subject: [PATCH 05/34] graph: view instead of GET_ROWS for identity
  recurrent-state copy (single seq, no rollback)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

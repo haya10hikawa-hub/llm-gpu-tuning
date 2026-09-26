@@ -1,7 +1,7 @@
 From 00caada789ae31fcd4bfe3c68ad73ce6e09780ef Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 11:04:14 +0000
-Subject: [PATCH 20/24] vulkan: GATED_DELTA_NET stores the decode state in
+Subject: [PATCH 20/34] vulkan: GATED_DELTA_NET stores the decode state in
  place and the write-back CPY is skipped
 
 When the K=1 new state is copied straight back over the state input (an identity view of the cache row) and

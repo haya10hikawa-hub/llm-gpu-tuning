@@ -1,7 +1,7 @@
 From 226f89ecb5b6a490e91adb853a02f272ff3da420 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 10:29:49 +0000
-Subject: [PATCH 17/24] vulkan: write the PQ2_0 mat-vec q8_1 activation from
+Subject: [PATCH 17/34] vulkan: write the PQ2_0 mat-vec q8_1 activation from
  the fused FWHT kernels
 
 MUL_FWHT and NORM_FWHT also store the quantize_q8_1_x4_i4 copy into prealloc_y (same arithmetic, same bytes) and

@@ -1,7 +1,7 @@
 From 3e12df1c2d9c2ec8a198473a5070cfe3e96af1a8 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 08:42:42 +0000
-Subject: [PATCH 13/24] vulkan: let the PQ2_0 MMQ pipelines be created (shmem
+Subject: [PATCH 13/34] vulkan: let the PQ2_0 MMQ pipelines be created (shmem
  support table was missing PQ2_0)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

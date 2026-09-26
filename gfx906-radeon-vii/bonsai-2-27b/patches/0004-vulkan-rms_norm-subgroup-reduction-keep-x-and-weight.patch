@@ -1,7 +1,7 @@
 From 05cf31ce1ede7b60cf411df2af3c1ae89388331d Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 04:02:57 +0000
-Subject: [PATCH 04/24] vulkan: rms_norm: subgroup reduction, keep x and weight
+Subject: [PATCH 04/34] vulkan: rms_norm: subgroup reduction, keep x and weight
  in registers
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

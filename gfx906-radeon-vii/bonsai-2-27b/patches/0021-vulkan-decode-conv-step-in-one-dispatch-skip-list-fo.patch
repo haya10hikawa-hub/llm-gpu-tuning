@@ -1,7 +1,7 @@
 From afc0763426a683065827968f8bed8f742f261d14 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 11:17:59 +0000
-Subject: [PATCH 21/24] vulkan: decode conv step in one dispatch; skip list for
+Subject: [PATCH 21/34] vulkan: decode conv step in one dispatch; skip list for
  nodes an earlier dispatch already did
 
 CONCAT(conv state, x^T) -> SSM_CONV -> SILU and the CPY of the shifted window back over the state (an identity

@@ -1,7 +1,7 @@
 From 8a3a94c1b626e23695c2763703da882020c38b2e Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 10:10:39 +0000
-Subject: [PATCH 16/24] tests: NORM_FWHT cases (single and dual output)
+Subject: [PATCH 16/34] tests: NORM_FWHT cases (single and dual output)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---

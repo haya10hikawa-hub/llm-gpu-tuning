@@ -1,7 +1,7 @@
 From 60fd7435a219295e5a057ee9146c8ba77b85caf9 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 10:08:05 +0000
-Subject: [PATCH 15/24] vulkan: fuse RMS_NORM + weight + sign + FWHT
+Subject: [PATCH 15/34] vulkan: fuse RMS_NORM + weight + sign + FWHT
  (fwht_norm) in front of Hadamard-folded mat-vecs
 
 One workgroup per (row, 1024-block); each re-reduces the L2-resident row so blocks run in parallel. The weighted

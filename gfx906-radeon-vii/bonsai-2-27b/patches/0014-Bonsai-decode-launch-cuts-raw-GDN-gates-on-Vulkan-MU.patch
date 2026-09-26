@@ -1,7 +1,7 @@
 From 46f4add16842a6e4c861553ae388b5e5dd3db9de Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 09:54:41 +0000
-Subject: [PATCH 14/24] Bonsai decode launch cuts: raw GDN gates on Vulkan,
+Subject: [PATCH 14/34] Bonsai decode launch cuts: raw GDN gates on Vulkan,
  MUL_FWHT exact aliasing, no-op ssm_out reshape
 
 - gated_delta_net.comp applies sigmoid(beta) and a*softplus(g+dt) itself (RAW_GATES), so qwen35 drops four

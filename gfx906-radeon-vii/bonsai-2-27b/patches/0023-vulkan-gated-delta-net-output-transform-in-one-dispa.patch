@@ -1,7 +1,7 @@
 From 11969438abd3cbee3e6af2805422785990698d55 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 12:31:55 +0000
-Subject: [PATCH 23/24] vulkan: gated-delta-net output transform in one
+Subject: [PATCH 23/34] vulkan: gated-delta-net output transform in one
  dispatch (fwht_gdn_tail); FWHT tests run whole graphs
 
 Per-head RMS_NORM * w, swiglu(z, .), the tiled -> grouped head permutation, signs and the FWHT in front of ssm_out

@@ -1,7 +1,7 @@
 From 00654b99d69f6cd26c7a8794b4fa6321c9c3756b Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 10:48:18 +0000
-Subject: [PATCH 18/24] vulkan: SWIGLU prologue in fwht_row (GLU_FWHT)
+Subject: [PATCH 18/34] vulkan: SWIGLU prologue in fwht_row (GLU_FWHT)
 
 {GLU swiglu(gate, up), MUL(signs), RESHAPE, MUL_MAT(H)} runs as one fwht_row dispatch that computes
 silu(gate) * up while loading: the FFN GLU dispatch and its intermediate disappear (-64 launches per Bonsai

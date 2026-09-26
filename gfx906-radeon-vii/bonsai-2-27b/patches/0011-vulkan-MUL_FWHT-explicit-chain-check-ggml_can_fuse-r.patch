@@ -1,7 +1,7 @@
 From c276b4d71ae9244c698de2c807fc75c6f2917cf1 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 07:54:13 +0000
-Subject: [PATCH 11/24] vulkan: MUL_FWHT: explicit chain check (ggml_can_fuse
+Subject: [PATCH 11/34] vulkan: MUL_FWHT: explicit chain check (ggml_can_fuse
  rejects the RESHAPE view and the shape change)
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

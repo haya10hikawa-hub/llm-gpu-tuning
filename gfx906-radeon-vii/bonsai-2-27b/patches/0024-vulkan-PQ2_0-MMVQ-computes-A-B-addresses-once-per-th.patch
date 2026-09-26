@@ -1,7 +1,7 @@
 From da13a64d9e8417c4623682b00c69ce82456fe4e0 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 13:18:17 +0000
-Subject: [PATCH 24/24] vulkan: PQ2_0 MMVQ computes A/B addresses once per
+Subject: [PATCH 24/34] vulkan: PQ2_0 MMVQ computes A/B addresses once per
  thread and row
 
 ACO spent about half of the ~30 VALU per 16 weights and row of the generic iter() on re-deriving block indices

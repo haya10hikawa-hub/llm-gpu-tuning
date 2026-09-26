@@ -1,7 +1,7 @@
 From 91162d568b5d454bc60b5e96083d6427eaff99ea Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 03:40:47 +0000
-Subject: [PATCH 02/24] vulkan: env knobs for matvec rows/wg size; tests:
+Subject: [PATCH 02/34] vulkan: env knobs for matvec rows/wg size; tests:
  Bonsai decode matvec perf cases
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

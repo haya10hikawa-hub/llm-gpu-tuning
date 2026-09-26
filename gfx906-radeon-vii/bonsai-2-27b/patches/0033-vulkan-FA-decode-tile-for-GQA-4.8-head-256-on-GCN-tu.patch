@@ -1,0 +1,77 @@
+From 584edf2e94d10ae9d1aa42152c84974c0f512fd6 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Sat, 26 Sep 2026 13:06:32 +0000
+Subject: [PATCH 33/34] vulkan: FA decode tile for GQA 4..8, head >= 256 on
+ GCN; tuning knobs; GQA-6 decode FA tests
+
+The 8-row tile split 4 ways left one subgroup on padding rows (GQA 6) and every subgroup re-read K/V. Now the tile
+is the GQA rows (even) over 2 subgroups with 16 threads per row: FA -16% at 4k, -23% at 32k context.
+GGML_VK_FA_GCN_GQA_TILE_DISABLE restores the old tile; GGML_VK_FA_BR/_BC/_ROW_SPLIT/_WG/_DSPLIT/_OCC override it.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 21 +++++++++++++++++++++
+ tests/test-backend-ops.cpp           |  8 ++++++++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 7cae6cc..1290b61 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -3895,6 +3895,27 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device,
+         }
+     }
+ 
++    // GCN, decode with GQA 4..8 and head size >= 256 (Qwen3.8-27B / Bonsai 2: GQA 6, head 256): a tile of exactly the
++    // GQA rows (rounded up to even) split over 2 subgroups, 16 threads per row. The default 8-row tile split 4 ways
++    // left a subgroup on padding rows with every subgroup re-reading K/V. FA -16% at 4k, -23% at 32k context.
++    if (device->architecture == AMD_GCN && device->subgroup_size == 64 && n_rows >= 4 && n_rows <= 8 && hsk >= 256 &&
++        hsv >= 256 && getenv("GGML_VK_FA_GCN_GQA_TILE_DISABLE") == nullptr) {
++        result.block_rows = (n_rows + 1) & ~1u;
++        result.row_split = 2;
++        result.workgroup_size = 2 * device->subgroup_size;
++        result.d_split = 16;
++    }
++
++    if (n_rows <= 8) {
++        auto const &env_u = [](const char * v, uint32_t & dst) { if (const char * e = getenv(v)) { dst = (uint32_t)atoi(e); } };
++        env_u("GGML_VK_FA_BR", result.block_rows);
++        env_u("GGML_VK_FA_BC", result.block_cols);
++        env_u("GGML_VK_FA_ROW_SPLIT", result.row_split);
++        env_u("GGML_VK_FA_WG", result.workgroup_size);
++        env_u("GGML_VK_FA_DSPLIT", result.d_split);
++        if (getenv("GGML_VK_FA_OCC")) { result.limit_occupancy_shmem = (uint32_t)atoi(getenv("GGML_VK_FA_OCC")) * 1024 / 4 / 4; }
++    }
++
+     return result;
+ }
+ 
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 194bc12..ff8d709 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -9635,6 +9635,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     for (auto [T, C] : std::initializer_list<std::pair<int64_t, int64_t>>{{1024, 10240}, {37, 100}, {256, 33}}) {
+         test_cases.emplace_back(new test_concat_t(3, T, C));
+     }
++    // Bonsai 2 27B / Qwen3.8-27B decode attention: GQA 6, head 256, one query token
++    for (int64_t kv : {1025, 4097}) {
++        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
++    }
+     test_cases.emplace_back(new test_conv_step(10240));
+     test_cases.emplace_back(new test_conv_step(384));
+     for (bool mmvq : {false, true}) {
+@@ -10691,6 +10695,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+     std::vector<std::unique_ptr<test_case>> test_cases;
+ 
++    // decode attention of Bonsai 2 27B: GQA 6, head 256, KV f16
++    for (int64_t kv : {4096, 32768}) {
++        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
++    }
+     // decode matvec shapes of Bonsai 2 27B (PQ2_0 / PTQ1_0), n = 1
+     {
+         const std::pair<int64_t, int64_t> shapes[] = {{17408, 5120}, {5120, 17408}, {10240, 5120}, {12288, 5120}, {6144, 5120}, {5120, 6144}};
+-- 
+2.53.0
+

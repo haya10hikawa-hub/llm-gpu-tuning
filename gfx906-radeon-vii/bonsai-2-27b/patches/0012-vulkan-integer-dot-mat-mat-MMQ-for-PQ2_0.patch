@@ -1,7 +1,7 @@
 From 757682003a88583a7791fcbd68e117759fffa71f Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Fri, 25 Sep 2026 08:10:58 +0000
-Subject: [PATCH 12/24] vulkan: integer-dot mat-mat (MMQ) for PQ2_0
+Subject: [PATCH 12/34] vulkan: integer-dot mat-mat (MMQ) for PQ2_0
 
 PQ2_0 had no MMQ pipeline, so prefill ran the dequant-to-f16 path at 5.4 TOPS (Q2_0 MMQ: 16.3 TOPS on the
 same GPU). Reuse the Q2_0 MMQ code with 4 sub-blocks per 128-value block.
