@@ -1,0 +1,179 @@
+From b96222e3fca070e7403f8a646ea31c2c982dd8d3 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 07:17:33 +0000
+Subject: [PATCH 10/24] vulkan: PQ2_0 mat-vec: interleave the q8_1 activation
+ instead of unpacking 2-bit codes
+
+The mat-vec is instruction-bound on gfx906. (bits >> 2m) & 0x03030303 puts codes m, m+4, m+8, m+12 into byte
+lanes, so a q8_1 activation written in that order (quantize_q8_1_x4_i4, mat-vec paths only) feeds v_dot4
+directly: 7 instead of ~20 instructions per 16 weights.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp          | 27 ++++++++++++++-----
+ .../vulkan-shaders/mul_mat_vecq_funcs.glsl    | 17 +++++++++++-
+ .../vulkan-shaders/quantize_q8_1.comp         | 14 ++++++++++
+ .../vulkan-shaders/vulkan-shaders-gen.cpp     |  2 ++
+ 4 files changed, 53 insertions(+), 7 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 7a1ee51..2c2a260 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -921,6 +921,7 @@ struct vk_device_struct {
+ 
+     vk_pipeline pipeline_matmul_split_k_reduce;
+     vk_pipeline pipeline_quantize_q8_1_x4;
++    vk_pipeline pipeline_quantize_q8_1_x4_i4; // activation order expected by the PQ2_0 mat-vec
+ 
+     vk_pipeline pipeline_dequant[GGML_TYPE_COUNT];
+     vk_pipeline pipeline_dequant_transpose[GGML_TYPE_COUNT]; // fused dequant+transpose for FA quant-KV
+@@ -5551,8 +5552,10 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+     if (device->subgroup_clustered && device->subgroup_require_full_support) {
+         ggml_vk_create_pipeline(device, device->pipeline_quantize_q8_1_x4, "quantize_q8_1_x4", quantize_q8_1_x4_subgroup_len, quantize_q8_1_x4_subgroup_data, "main", 2, sizeof(vk_quantize_q8_1_push_constants), {32 * device->subgroup_size / 8, 1, 1}, { device->subgroup_size }, 1, true, true);
++        ggml_vk_create_pipeline(device, device->pipeline_quantize_q8_1_x4_i4, "quantize_q8_1_x4_i4", quantize_q8_1_x4_i4_subgroup_len, quantize_q8_1_x4_i4_subgroup_data, "main", 2, sizeof(vk_quantize_q8_1_push_constants), {32 * device->subgroup_size / 8, 1, 1}, { device->subgroup_size }, 1, true, true);
+     } else {
+         ggml_vk_create_pipeline(device, device->pipeline_quantize_q8_1_x4, "quantize_q8_1_x4", quantize_q8_1_x4_len, quantize_q8_1_x4_data, "main", 2, sizeof(vk_quantize_q8_1_push_constants), {32 * device->subgroup_size / 8, 1, 1}, { device->subgroup_size }, 1);
++        ggml_vk_create_pipeline(device, device->pipeline_quantize_q8_1_x4_i4, "quantize_q8_1_x4_i4", quantize_q8_1_x4_i4_len, quantize_q8_1_x4_i4_data, "main", 2, sizeof(vk_quantize_q8_1_push_constants), {32 * device->subgroup_size / 8, 1, 1}, { device->subgroup_size }, 1);
+     }
+ 
+     for (uint32_t i = 0; i < p021_max_gqa_ratio; ++i) {
+@@ -9253,10 +9256,22 @@ static vk_pipeline ggml_vk_get_quantize_pipeline(ggml_backend_vk_context * ctx,
+     }
+ }
+ 
+-static void ggml_vk_quantize_q8_1(ggml_backend_vk_context * ctx, vk_context& subctx, const vk_subbuffer & in, const vk_subbuffer & out, uint32_t ne) {
++// q8_1 activations for a mat-vec over src0 of type a_type: PQ2_0 reads them in the interleaved order
++static vk_pipeline ggml_vk_get_quantize_pipeline_matvec(ggml_backend_vk_context * ctx, ggml_type a_type) {
++    if (a_type == GGML_TYPE_PQ2_0) {
++        GGML_ASSERT(ctx->device->pipeline_quantize_q8_1_x4_i4 != nullptr);
++        return ctx->device->pipeline_quantize_q8_1_x4_i4;
++    }
++    return ggml_vk_get_quantize_pipeline(ctx, GGML_TYPE_Q8_1);
++}
++
++static void ggml_vk_quantize_q8_1(ggml_backend_vk_context * ctx, vk_context& subctx, const vk_subbuffer & in, const vk_subbuffer & out, uint32_t ne,
++                                  vk_pipeline pipeline = nullptr) {
+     VK_LOG_DEBUG("ggml_vk_quantize_q8_1(" << "buffer in size=" << in.buffer->size << ", buffer out size=" << out.buffer->size << ", " << ne << ")");
+ 
+-    vk_pipeline pipeline = ggml_vk_get_quantize_pipeline(ctx, GGML_TYPE_Q8_1);
++    if (pipeline == nullptr) {
++        pipeline = ggml_vk_get_quantize_pipeline(ctx, GGML_TYPE_Q8_1);
++    }
+ 
+     const uint32_t num_blocks = CEIL_DIV(ne, pipeline->wg_denoms[0]);
+     // clamp the number of elements to the max workgroup count. The shader will iterate over the total number of blocks.
+@@ -9705,7 +9720,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
+     }
+ 
+     if (quantize_y) {
+-        to_q8_1 = ggml_vk_get_quantize_pipeline(ctx, GGML_TYPE_Q8_1);
++        to_q8_1 = ggml_vk_get_quantize_pipeline_matvec(ctx, src0->type);
+     }
+ 
+     if (ggml_nbytes(src0) > ctx->device->properties.limits.maxStorageBufferRange) {
+@@ -9803,7 +9818,7 @@ static void ggml_vk_mul_mat_vec_q_f16(ggml_backend_vk_context * ctx, vk_context&
+             if (ctx->prealloc_y_need_sync) {
+                 ggml_vk_sync_buffers(ctx, subctx);
+             }
+-            ggml_vk_quantize_q8_1(ctx, subctx, d_Qy, d_Y, y_ne);
++            ggml_vk_quantize_q8_1(ctx, subctx, d_Qy, d_Y, y_ne, to_q8_1);
+             ctx->prealloc_y_last_pipeline_used = to_q8_1.get();
+             ctx->prealloc_y_last_tensor_used = src1;
+             ctx->prealloc_y_last_decode_vector_staging = false;
+@@ -10686,7 +10701,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
+     }
+ 
+     if (quantize_y) {
+-        to_q8_1 = ggml_vk_get_quantize_pipeline(ctx, GGML_TYPE_Q8_1);
++        to_q8_1 = ggml_vk_get_quantize_pipeline_matvec(ctx, src0->type);
+     }
+ 
+     const bool qx_needs_dequant = x_non_contig;
+@@ -10787,7 +10802,7 @@ static void ggml_vk_mul_mat_vec_id_q_f16(ggml_backend_vk_context * ctx, vk_conte
+             if (ctx->prealloc_y_need_sync) {
+                 ggml_vk_sync_buffers(ctx, subctx);
+             }
+-            ggml_vk_quantize_q8_1(ctx, subctx, d_Qy, d_Y, y_ne);
++            ggml_vk_quantize_q8_1(ctx, subctx, d_Qy, d_Y, y_ne, to_q8_1);
+             ctx->prealloc_y_last_pipeline_used = to_q8_1.get();
+             ctx->prealloc_y_last_tensor_used = src1;
+             ctx->prealloc_y_last_decode_vector_staging = false;
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl
+index 8b13224..04c4fe7 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mat_vecq_funcs.glsl
+@@ -182,7 +182,22 @@ FLOAT_TYPE mul_q8_1(const int32_t q_sum, const float da, const vec2 dsb, const i
+ }
+ #endif
+ 
+-#if defined(DATA_A_Q2_0) || defined(DATA_A_PQ2_0)
++#if defined(DATA_A_PQ2_0)
++// B comes from quantize_q8_1_x4_i4: in each 16-value half, dword m holds values m, m+4, m+8, m+12. Code j of the
++// 16 codes in `bits` sits at bits 2j, so (bits >> 2m) & 0x03030303 lines up with dword m byte for byte.
++FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
++    const uint qs_idx = (ib_a & 3u) * 4u + iqs * 2u;
++    const uint bits = pack32(u16vec2(data_a_packed16[ib_a / 4].qs[qs_idx],
++                                     data_a_packed16[ib_a / 4].qs[qs_idx + 1]));
++    int32_t q_sum = dotPacked4x8EXT(int32_t(bits & 0x03030303u), cache_b_qs[0]);
++    q_sum += dotPacked4x8EXT(int32_t((bits >> 2u) & 0x03030303u), cache_b_qs[1]);
++    q_sum += dotPacked4x8EXT(int32_t((bits >> 4u) & 0x03030303u), cache_b_qs[2]);
++    q_sum += dotPacked4x8EXT(int32_t((bits >> 6u) & 0x03030303u), cache_b_qs[3]);
++
++    // 16 quants per call => divide sums by 32/16 = 2
++    return mul_q8_1(q_sum, get_dm(ib_a), cache_b_ds, 2);
++}
++#elif defined(DATA_A_Q2_0)
+ FLOAT_TYPE mmvq_dot_product(const uint ib_a, const uint iqs) {
+     int32_t q_sum = 0;
+     const i32vec4 qs_a = repack4(ib_a, iqs);
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp b/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp
+index 7ea29a0..83f89f8 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/quantize_q8_1.comp
+@@ -24,6 +24,10 @@ layout(constant_id = 0) const uint GROUP_SIZE = 32;
+ layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+ 
+ layout (binding = 0) readonly buffer A {vec4 data_a[];};
++#ifdef QUANT_INTERLEAVE4
++// scalar view of the same input, for the strided gather below
++layout (binding = 0) readonly buffer AF {float data_af[];};
++#endif
+ #ifndef QBLOCK_X4
+ layout (binding = 1) writeonly buffer D {block_q8_1_packed32 data_b[];};
+ #else
+@@ -57,7 +61,17 @@ void quantize(const uint wgid) {
+ 
+     const uint a_idx = ib * 8 + iqs;
+ 
++#ifdef QUANT_INTERLEAVE4
++    // dword iqs of the 32-value block holds values m, m+4, m+8, m+12 of its 16-value half (m = iqs % 4),
++    // the order the PQ2_0 mat-vec extracts its 2-bit codes in. amax and the block sum see the same 32 values.
++    const uint e0 = ib * 32 + (iqs / 4) * 16 + (iqs % 4);
++    vec4 vals = vec4(e0      < p.ne ? data_af[e0]      : 0.0f,
++                     e0 + 4  < p.ne ? data_af[e0 + 4]  : 0.0f,
++                     e0 + 8  < p.ne ? data_af[e0 + 8]  : 0.0f,
++                     e0 + 12 < p.ne ? data_af[e0 + 12] : 0.0f);
++#else
+     vec4 vals = a_idx < p.ne / 4 ? data_a[a_idx] : vec4(0.0f);
++#endif
+     const vec4 abs_vals = abs(vals);
+ 
+     // Find absolute max for each block
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 219a3ac..d6f3243 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -890,6 +890,8 @@ void process_shaders() {
+ 
+     string_to_spv("quantize_q8_1_x4", "quantize_q8_1.comp", {{"QBLOCK_X4", "1"}});
+     string_to_spv("quantize_q8_1_x4_subgroup", "quantize_q8_1.comp", {{"QBLOCK_X4", "1"}, {"USE_SUBGROUPS", "1"}});
++    string_to_spv("quantize_q8_1_x4_i4", "quantize_q8_1.comp", {{"QBLOCK_X4", "1"}, {"QUANT_INTERLEAVE4", "1"}});
++    string_to_spv("quantize_q8_1_x4_i4_subgroup", "quantize_q8_1.comp", {{"QBLOCK_X4", "1"}, {"QUANT_INTERLEAVE4", "1"}, {"USE_SUBGROUPS", "1"}});
+ 
+     string_to_spv("mul_f32", "mul.comp", {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}, {"FLOAT_TYPE", "float"}});
+ 
+-- 
+2.53.0
+

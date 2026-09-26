@@ -1,0 +1,4 @@
+sampler,before_ms,after_ms,note
+penalties (64-token window),2.866,0.001,248320-entry vocabulary; bit-identical logits
+top_k 20,0.129,0.120,
+fill candidate array,0.309,0.309,

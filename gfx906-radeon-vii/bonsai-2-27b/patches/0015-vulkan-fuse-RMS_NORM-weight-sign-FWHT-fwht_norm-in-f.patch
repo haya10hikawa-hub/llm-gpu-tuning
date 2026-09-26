@@ -1,0 +1,393 @@
+From 60fd7435a219295e5a057ee9146c8ba77b85caf9 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 10:08:05 +0000
+Subject: [PATCH 15/24] vulkan: fuse RMS_NORM + weight + sign + FWHT
+ (fwht_norm) in front of Hadamard-folded mat-vecs
+
+One workgroup per (row, 1024-block); each re-reduces the L2-resident row so blocks run in parallel. The weighted
+norm is also written when it has other consumers (GDN alpha/beta). GGML_VK_DISABLE_NORM_FWHT turns it off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp          | 146 +++++++++++++++++-
+ .../ggml-vulkan/vulkan-shaders/fwht_norm.comp | 121 +++++++++++++++
+ .../vulkan-shaders/vulkan-shaders-gen.cpp     |   1 +
+ 3 files changed, 266 insertions(+), 2 deletions(-)
+ create mode 100644 ggml/src/ggml-vulkan/vulkan-shaders/fwht_norm.comp
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 7c4c0b5..0d31126 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1060,6 +1060,7 @@ struct vk_device_struct {
+     // one workgroup per row (fwht_row.comp): few-row decode case, optionally with the sign flip fused in
+     vk_pipeline pipeline_fwht_row_f32[GGML_VK_FWHT_NUM_SIZES];
+     vk_pipeline pipeline_fwht_row_signed_f32[GGML_VK_FWHT_NUM_SIZES];
++    vk_pipeline pipeline_fwht_norm_f32[GGML_VK_FWHT_NUM_SIZES];
+     vk_pipeline pipeline_cumsum_f32;
+     vk_pipeline pipeline_cumsum_small_f32;
+     vk_pipeline pipeline_cumsum_multipass1_f32;
+@@ -1421,6 +1422,21 @@ struct vk_op_fwht_push_constants {
+     float scale;
+ };
+ 
++struct vk_op_fwht_norm_push_constants {
++    uint32_t n_rows;
++    uint32_t row_width;
++    uint32_t x_off;
++    uint32_t x_row_stride;
++    uint32_t w_off;
++    uint32_t w_ne0;
++    uint32_t sign_off;
++    uint32_t dst_off;
++    uint32_t norm_off;
++    uint32_t has_norm_out;
++    float eps;
++    float scale;
++};
++
+ struct vk_op_fwht_row_push_constants {
+     uint32_t n_rows;
+     uint32_t src_offset;
+@@ -2419,6 +2435,8 @@ struct ggml_backend_vk_context {
+     topk_moe_mode fused_topk_moe_mode {};
+     bool fused_topk_moe_scale {};
+     bool fused_mul_fwht {};
++    bool fused_norm_fwht {};
++    bool fused_norm_fwht_dual {};
+ 
+     // for GGML_VK_PERF_LOGGER
+     std::unique_ptr<vk_perf_logger> perf_logger;
+@@ -5869,6 +5887,9 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+                 n * sizeof(float) <= device->properties.limits.maxComputeSharedMemorySize) {
+                 ggml_vk_create_pipeline(device, device->pipeline_fwht_row_f32[idx], "fwht_row_f32", fwht_row_f32_len, fwht_row_f32_data, "main", 2, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
+                 ggml_vk_create_pipeline(device, device->pipeline_fwht_row_signed_f32[idx], "fwht_row_signed_f32", fwht_row_signed_f32_len, fwht_row_signed_f32_data, "main", 3, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
++                if (device->subgroup_arithmetic) {
++                    ggml_vk_create_pipeline(device, device->pipeline_fwht_norm_f32[idx], "fwht_norm_f32", fwht_norm_f32_len, fwht_norm_f32_data, "main", 5, sizeof(vk_op_fwht_norm_push_constants), {1, 1, 1}, { n }, 1);
++                }
+             }
+             ++idx;
+         }
+@@ -10173,6 +10194,98 @@ static void ggml_vk_fwht_row(ggml_backend_vk_context * ctx, vk_context& subctx,
+     }
+ }
+ 
++// {RMS_NORM(x), MUL(., w), MUL(., signs), RESHAPE, MUL_MAT(rot, .) with the Hadamard hint} -> one fwht_norm
++// dispatch. Returns 0 if not fusable, 1 if fusable, 2 if fusable but the weighted norm (node_idx+1) has other
++// consumers and must also be written.
++static int ggml_vk_can_fuse_norm_fwht(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    static const bool disabled = getenv("GGML_VK_DISABLE_NORM_FWHT") != nullptr;
++    if (disabled || node_idx + 4 >= cgraph->n_nodes) {
++        return 0;
++    }
++    const ggml_tensor * rn = cgraph->nodes[node_idx];
++    const ggml_tensor * mw = cgraph->nodes[node_idx + 1];
++    const ggml_tensor * ms = cgraph->nodes[node_idx + 2];
++    const ggml_tensor * rs = cgraph->nodes[node_idx + 3];
++    const ggml_tensor * mm = cgraph->nodes[node_idx + 4];
++    if (rn->op != GGML_OP_RMS_NORM || mw->op != GGML_OP_MUL || ms->op != GGML_OP_MUL || rs->op != GGML_OP_RESHAPE || mm->op != GGML_OP_MUL_MAT) {
++        return 0;
++    }
++    if (ggml_get_op_params_i32(mm, 1) != GGML_HINT_SRC0_IS_HADAMARD || mm->src[1] != rs || rs->src[0] != ms || rs->view_src != ms ||
++        ms->src[0] != mw || mw->src[0] != rn) {
++        return 0;
++    }
++    const ggml_tensor * x = rn->src[0];
++    const ggml_tensor * w = mw->src[1];
++    const ggml_tensor * signs = ms->src[1];
++    const int64_t n = mm->src[0]->ne[0];
++    const int idx = ggml_vk_fwht_pipeline_idx(n);
++    if (idx < 0 || ctx->device->pipeline_fwht_norm_f32[idx] == nullptr) {
++        return 0;
++    }
++    if (x->type != GGML_TYPE_F32 || w->type != GGML_TYPE_F32 || signs->type != GGML_TYPE_F32 || rn->type != GGML_TYPE_F32 ||
++        mw->type != GGML_TYPE_F32 || ms->type != GGML_TYPE_F32 || mm->type != GGML_TYPE_F32) {
++        return 0;
++    }
++    // row-wise norm over ne0, weight broadcast along ne0 only, one sign vector across the row
++    if (x->nb[0] != sizeof(float) || ggml_nrows(x) != ggml_nrows(rn) || x->ne[2] * x->ne[3] != 1 ||
++        !ggml_is_contiguous(w) || ggml_nrows(w) != 1 || x->ne[0] % w->ne[0] != 0 ||
++        !ggml_is_contiguous(signs) || ggml_nrows(signs) != 1 || signs->ne[0] != x->ne[0] || x->ne[0] % n != 0 ||
++        !ggml_is_contiguous(mw) || !ggml_is_contiguous(mm)) {
++        return 0;
++    }
++    if ((uint32_t)ggml_nrows(x) > ggml_vk_fwht_row_max()) {
++        return 0;
++    }
++    // the norm and the sign flip (and its reshape) must only feed the next node; the weighted norm may have
++    // other consumers, which then read the second output
++    if (ggml_node_get_use_count(cgraph, node_idx) != 1 || ggml_node_get_use_count(cgraph, node_idx + 2) != 1 ||
++        ggml_node_get_use_count(cgraph, node_idx + 3) != 1 ||
++        (rn->flags & GGML_TENSOR_FLAG_OUTPUT) || (ms->flags & GGML_TENSOR_FLAG_OUTPUT) || (rs->flags & GGML_TENSOR_FLAG_OUTPUT)) {
++        return 0;
++    }
++    const bool dual = ggml_node_get_use_count(cgraph, node_idx + 1) != 1 || (mw->flags & GGML_TENSOR_FLAG_OUTPUT);
++    return dual ? 2 : 1;
++}
++
++static void ggml_vk_norm_fwht(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx, bool dual) {
++    const ggml_tensor * rn = cgraph->nodes[node_idx];
++    ggml_tensor * mw = cgraph->nodes[node_idx + 1];
++    const ggml_tensor * ms = cgraph->nodes[node_idx + 2];
++    ggml_tensor * mm = cgraph->nodes[node_idx + 4];
++    const ggml_tensor * x = rn->src[0];
++    const ggml_tensor * w = mw->src[1];
++    const ggml_tensor * signs = ms->src[1];
++    const int64_t n = mm->src[0]->ne[0];
++    const int idx = ggml_vk_fwht_pipeline_idx(n);
++    vk_pipeline pipeline = ctx->device->pipeline_fwht_norm_f32[idx];
++    GGML_ASSERT(pipeline != nullptr);
++
++    const uint32_t n_rows = (uint32_t)ggml_nrows(x);
++    const uint32_t W = (uint32_t)x->ne[0];
++    const uint32_t n_wg = std::min<uint32_t>(n_rows * (W / (uint32_t)n), ctx->device->properties.limits.maxComputeWorkGroupCount[0]);
++    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
++
++    const vk_subbuffer x_buf = ggml_vk_tensor_subbuffer(ctx, x, true);
++    const vk_subbuffer w_buf = ggml_vk_tensor_subbuffer(ctx, w, true);
++    const vk_subbuffer s_buf = ggml_vk_tensor_subbuffer(ctx, signs, true);
++    const vk_subbuffer d_buf = ggml_vk_tensor_subbuffer(ctx, mm, true);
++    const vk_subbuffer n_buf = dual ? ggml_vk_tensor_subbuffer(ctx, mw, true) : d_buf;
++
++    float eps;
++    memcpy(&eps, rn->op_params, sizeof(float));
++    const vk_op_fwht_norm_push_constants pc = {
++        n_rows, W,
++        (uint32_t)(get_misalign_bytes(ctx, x) / sizeof(float)), (uint32_t)(x->nb[1] / sizeof(float)),
++        (uint32_t)(get_misalign_bytes(ctx, w) / sizeof(float)), (uint32_t)w->ne[0],
++        (uint32_t)(get_misalign_bytes(ctx, signs) / sizeof(float)),
++        (uint32_t)(get_misalign_bytes(ctx, mm) / sizeof(float)),
++        dual ? (uint32_t)(get_misalign_bytes(ctx, mw) / sizeof(float)) : 0u,
++        dual ? 1u : 0u,
++        eps, 1.0f / std::sqrt((float)n),
++    };
++    ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { x_buf, w_buf, s_buf, d_buf, n_buf }, pc, { n_wg, 1, 1 });
++}
++
+ // {MUL(x, signs), RESHAPE, MUL_MAT(rot, .) with the Hadamard hint} -> one fwht_row_signed dispatch
+ static bool ggml_vk_can_fuse_mul_fwht(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
+     static const bool disabled = getenv("GGML_VK_DISABLE_MUL_FWHT") != nullptr;
+@@ -15824,7 +15937,11 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+ 
+         break;
+     case GGML_OP_RMS_NORM:
+-        ggml_vk_rms_norm(ctx, compute_ctx, cgraph, node_idx, (float *)node->op_params);
++        if (ctx->fused_norm_fwht) {
++            ggml_vk_norm_fwht(ctx, compute_ctx, cgraph, node_idx, ctx->fused_norm_fwht_dual);
++        } else {
++            ggml_vk_rms_norm(ctx, compute_ctx, cgraph, node_idx, (float *)node->op_params);
++        }
+         break;
+     case GGML_OP_RMS_NORM_BACK:
+         ggml_vk_rms_norm_back(ctx, compute_ctx, src0, src1, node);
+@@ -17474,6 +17591,8 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
+         ctx->fused_topk_moe_scale = false;
+         ctx->fused_mul_fwht = false;
++        ctx->fused_norm_fwht = false;
++        ctx->fused_norm_fwht_dual = false;
+         const char *fusion_string {};
+         if (!ctx->device->disable_fusion) {
+             uint32_t num_adds = ggml_vk_fuse_multi_add(ctx, cgraph, i);
+@@ -17481,6 +17600,17 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 ctx->num_additional_fused_ops = num_adds - 1;
+                 fusion_string = "MULTI_ADD";
+                 std::fill_n(op_srcs_fused_elementwise, ctx->num_additional_fused_ops + 1, true);
++            } else if (int nf = ggml_vk_can_fuse_norm_fwht(ctx, cgraph, i)) {
++                ctx->num_additional_fused_ops = 4;
++                ctx->fused_norm_fwht = true;
++                ctx->fused_norm_fwht_dual = nf == 2;
++                fusion_string = nf == 2 ? "NORM_FWHT_DUAL" : "NORM_FWHT";
++                // the norm reads its whole row before writing, but other workgroups write their blocks while
++                // it is still being read: sources must not alias the outputs
++                std::fill_n(op_srcs_fused_elementwise, 5, false);
++                if (nf == 2) {
++                    ctx->fused_ops_write_mask |= 1 << 1;
++                }
+             } else if (ggml_vk_can_fuse_mul_fwht(ctx, cgraph, i)) {
+                 ctx->num_additional_fused_ops = 2;
+                 ctx->fused_mul_fwht = true;
+@@ -17687,6 +17817,8 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
+                 ctx->fused_topk_moe_scale = false;
+                 ctx->fused_mul_fwht = false;
++                ctx->fused_norm_fwht = false;
++                ctx->fused_norm_fwht_dual = false;
+             }
+         }
+ 
+@@ -17839,6 +17971,13 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+ 
+         // sign flip + reshape + Hadamard-hinted matmul: fused into one FWHT dispatch (ggml_vk_can_fuse_mul_fwht)
+         static constexpr std::initializer_list<ggml_op> mul_fwht_pattern { GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT };
++        static constexpr std::initializer_list<ggml_op> norm_fwht_pattern { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT };
++        auto const &is_norm_fwht = [&](int start) -> bool {
++            return match_pattern(norm_fwht_pattern, start) &&
++                   graph->nodes[start + 1]->src[0] == graph->nodes[start] &&
++                   graph->nodes[start + 2]->src[0] == graph->nodes[start + 1] &&
++                   ggml_get_op_params_i32(graph->nodes[start + 4], 1) == GGML_HINT_SRC0_IS_HADAMARD;
++        };
+         auto const &is_mul_fwht = [&](int start) -> bool {
+             return match_pattern(mul_fwht_pattern, start) &&
+                    ggml_get_op_params_i32(graph->nodes[start + 2], 1) == GGML_HINT_SRC0_IS_HADAMARD;
+@@ -17876,6 +18015,9 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+         if (keep_pattern(snake_pattern)) {
+             continue;
+         }
++        if (is_norm_fwht(first_unused) && keep_pattern(norm_fwht_pattern)) {
++            continue;
++        }
+         if (is_mul_fwht(first_unused) && keep_pattern(mul_fwht_pattern)) {
+             continue;
+         }
+@@ -17904,7 +18046,7 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+                 match_pattern(topk_moe_early_softmax, j) ||
+                 match_pattern(topk_moe_late_softmax, j) ||
+                 match_pattern(snake_pattern, j) ||
+-                is_mul_fwht(j)) {
++                is_mul_fwht(j) || is_norm_fwht(j)) {
+                 continue;
+             }
+             bool ok = true;
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/fwht_norm.comp b/ggml/src/ggml-vulkan/vulkan-shaders/fwht_norm.comp
+new file mode 100644
+index 0000000..f8ab0e2
+--- /dev/null
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/fwht_norm.comp
+@@ -0,0 +1,121 @@
++#version 450
++
++// RMS_NORM + MUL(weight) + MUL(signs) + FWHT in one dispatch: the input transform in front of the
++// Hadamard-folded weight mat-vecs (attn_norm, post-attention norm, output norm).
++//
++// One workgroup per (row, N-sized block). Every workgroup reduces sum(x^2) over the whole row itself - the row
++// is a few tens of KB and L2-resident, so the duplicated reduction is cheap - and then normalises, weights,
++// sign-flips and transforms only its own block, so the blocks of a row run in parallel instead of behind a
++// single-workgroup norm. With HAS_NORM_OUT the normalised, weighted row (the MUL output) is also written for
++// other consumers (the GDN alpha/beta mat-vecs read it unrotated).
++
++#extension GL_EXT_control_flow_attributes : require
++#extension GL_KHR_shader_subgroup_basic : require
++#extension GL_KHR_shader_subgroup_arithmetic : require
++#extension GL_KHR_shader_subgroup_shuffle : require
++
++layout(constant_id = 0) const uint N = 1024;
++
++#define WG 256
++const uint EL = N / WG;
++
++layout(local_size_x = WG, local_size_y = 1, local_size_z = 1) in;
++
++layout(push_constant) uniform parameter
++{
++    uint n_rows;
++    uint row_width;      // elements per row (W), a multiple of N
++    uint x_off;          // element offsets of the bindings
++    uint x_row_stride;
++    uint w_off;
++    uint w_ne0;          // weight length (broadcast over rows, modulo if shorter than W)
++    uint sign_off;
++    uint dst_off;
++    uint norm_off;
++    uint has_norm_out;
++    float eps;
++    float scale;         // 1/sqrt(N)
++};
++
++layout(binding = 0, std430) readonly buffer X { float data_x[]; };
++layout(binding = 1, std430) readonly buffer Wt { float data_w[]; };
++layout(binding = 2, std430) readonly buffer S { float data_s[]; };
++layout(binding = 3, std430) writeonly buffer D { float data_d[]; };
++layout(binding = 4, std430) writeonly buffer Nm { float data_n[]; };
++
++shared float shmem[N];
++shared float red[WG / 8];
++
++void main() {
++    const uint tid = gl_LocalInvocationID.x;
++    const uint sg = gl_SubgroupSize;
++    const uint blocks = row_width / N;
++
++    for (uint wgi = gl_WorkGroupID.x; wgi < n_rows * blocks; wgi += gl_NumWorkGroups.x) {
++        const uint row = wgi / blocks;
++        const uint blk = wgi % blocks;
++        const uint xrow = x_off + row * x_row_stride;
++
++        float ss = 0.0;
++        for (uint e = tid; e < row_width; e += WG) {
++            const float v = data_x[xrow + e];
++            ss += v * v;
++        }
++        ss = subgroupAdd(ss);
++        if (gl_SubgroupInvocationID == 0) {
++            red[gl_SubgroupID] = ss;
++        }
++        barrier();
++        float total = 0.0;
++        for (uint s = 0; s < gl_NumSubgroups; ++s) {
++            total += red[s];
++        }
++        barrier();
++        const float rs = inversesqrt(total / float(row_width) + eps);
++
++        float reg[EL];
++        [[unroll]] for (uint i = 0; i < EL; ++i) {
++            const uint col = blk * N + tid + WG * i;
++            const float xn = data_x[xrow + col] * rs * data_w[w_off + col % w_ne0];
++            if (has_norm_out != 0) {
++                data_n[norm_off + row * row_width + col] = xn;
++            }
++            reg[i] = xn * data_s[sign_off + col] * scale;
++        }
++
++        [[unroll]] for (uint h = 1; h < WG; h <<= 1) {
++            const bool upper = (tid & h) != 0;
++            if (h < sg) {
++                [[unroll]] for (uint i = 0; i < EL; ++i) {
++                    const float other = subgroupShuffleXor(reg[i], h);
++                    reg[i] = upper ? other - reg[i] : reg[i] + other;
++                }
++            } else {
++                [[unroll]] for (uint i = 0; i < EL; ++i) {
++                    shmem[tid + WG * i] = reg[i];
++                }
++                barrier();
++                [[unroll]] for (uint i = 0; i < EL; ++i) {
++                    const float other = shmem[(tid ^ h) + WG * i];
++                    reg[i] = upper ? other - reg[i] : reg[i] + other;
++                }
++                barrier();
++            }
++        }
++
++        [[unroll]] for (uint step = 1; step < EL; step <<= 1) {
++            [[unroll]] for (uint i = 0; i < EL; ++i) {
++                if ((i & step) == 0) {
++                    const float x = reg[i];
++                    const float y = reg[i + step];
++                    reg[i] = x + y;
++                    reg[i + step] = x - y;
++                }
++            }
++        }
++
++        [[unroll]] for (uint i = 0; i < EL; ++i) {
++            data_d[dst_off + wgi * N + tid + WG * i] = reg[i];
++        }
++    }
++}
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 7aac12b..17ce5e7 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -1045,6 +1045,7 @@ void process_shaders() {
+     string_to_spv("fwht_shmem_f16", "fwht.comp", {{"FWHT_F16", "1"}, {"FWHT_SHMEM", "1"}});
+     string_to_spv("fwht_row_f32", "fwht_row.comp", {});
+     string_to_spv("fwht_row_signed_f32", "fwht_row.comp", {{"FWHT_SIGNED", "1"}});
++    string_to_spv("fwht_norm_f32", "fwht_norm.comp", {});
+     string_to_spv("count_equal_i32", "count_equal.comp", merge_maps(base_dict, {{"A_TYPE", "int"}, {"B_TYPE", "int"}, {"D_TYPE", "int"}}));
+     string_to_spv("cumsum_f32", "cumsum.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+     string_to_spv("cumsum_multipass1_f32", "cumsum_multipass1.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+-- 
+2.53.0
+

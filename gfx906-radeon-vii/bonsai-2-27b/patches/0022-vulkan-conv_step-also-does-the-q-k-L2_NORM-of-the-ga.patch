@@ -1,0 +1,244 @@
+From 077216d576bae8b1afcee58ab75a95da6783f8e4 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 12:22:39 +0000
+Subject: [PATCH 22/24] vulkan: conv_step also does the q/k L2_NORM of the
+ gated-delta-net layers
+
+One 128-channel head per workgroup; for the q and k heads it reduces |y|^2 and writes y / max(|y|, eps) into the
+L2_NORM output, which is skipped: -48 barriers and launches per Bonsai decode token. GGML_VK_DISABLE_CONV_L2
+keeps the separate L2_NORM. Test: CONV_STEP now checks the L2 output too.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp          | 45 ++++++++++++--
+ .../ggml-vulkan/vulkan-shaders/conv_step.comp | 59 ++++++++++++++-----
+ tests/test-backend-ops.cpp                    | 12 +++-
+ 3 files changed, 92 insertions(+), 24 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 460b496..0bac083 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1926,6 +1926,9 @@ struct vk_op_conv_step_push_constants {
+     uint32_t w_off;
+     uint32_t w_stride;
+     uint32_t d_off;
++    uint32_t l2_heads;
++    uint32_t l2_off;
++    float eps;
+ };
+ 
+ struct vk_op_ssm_conv_push_constants {
+@@ -6062,7 +6065,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_ssm_conv_f32,           "ssm_conv_f32",           ssm_conv_f32_len, ssm_conv_f32_data, "main", 4, sizeof(vk_op_ssm_conv_push_constants), {32, 16, 1}, {32, 16, 0, 0}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_ssm_conv_silu_f32,      "ssm_conv_silu_f32",      ssm_conv_f32_len, ssm_conv_f32_data, "main", 4, sizeof(vk_op_ssm_conv_push_constants), {32, 16, 1}, {32, 16, 0, 1}, 1);
+-    ggml_vk_create_pipeline(device, device->pipeline_conv_step_f32, "conv_step_f32", conv_step_f32_len, conv_step_f32_data, "main", 4, sizeof(vk_op_conv_step_push_constants), {256, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_conv_step_f32, "conv_step_f32", conv_step_f32_len, conv_step_f32_data, "main", 5, sizeof(vk_op_conv_step_push_constants), {128, 1, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_ssm_conv_bias_silu_f32, "ssm_conv_bias_silu_f32", ssm_conv_f32_len, ssm_conv_f32_data, "main", 4, sizeof(vk_op_ssm_conv_push_constants), {32, 16, 1}, {32, 16, 1, 1}, 1);
+ 
+     ggml_vk_create_pipeline(device, device->pipeline_opt_step_adamw_f32, "opt_step_adamw_f32", opt_step_adamw_f32_len, opt_step_adamw_f32_data, "main", 5, sizeof(vk_op_push_constants), {512, 1, 1}, {}, 1);
+@@ -13454,11 +13457,33 @@ static void ggml_vk_ssm_scan(ggml_backend_vk_context * ctx, vk_context& subctx,
+ // Decode conv step: CONCAT(st = conv state, x^T) at node_idx, SSM_CONV(cat, w) + SILU, and CPY(view(cat, 1..3) ->
+ // st memory). When st is only read by the CONCAT, the concat only feeds those two and real work follows, returns
+ // true with the SSM_CONV, SILU and CPY nodes.
++// The L2_NORM over a [128, heads] view at offset 0 of the SILU output (q and k), if one follows: conv_step does it.
++static const ggml_tensor * ggml_vk_conv_step_l2(const struct ggml_cgraph * cgraph, int node_idx, const ggml_tensor * silu) {
++    static const bool disabled = getenv("GGML_VK_DISABLE_CONV_L2") != nullptr;
++    if (disabled) {
++        return nullptr;
++    }
++    for (int j = node_idx + 1; j < cgraph->n_nodes && j <= node_idx + 48; j++) {
++        const ggml_tensor * n = cgraph->nodes[j];
++        if (n->op != GGML_OP_L2_NORM) {
++            continue;
++        }
++        const ggml_tensor * v = n->src[0];
++        if (v->view_src != silu || v->view_offs != 0 || v->type != GGML_TYPE_F32 || n->type != GGML_TYPE_F32 ||
++            v->ne[0] != 128 || v->ne[2] != 1 || v->ne[3] != 1 || v->nb[0] != sizeof(float) || v->nb[1] != 128 * sizeof(float) ||
++            !ggml_is_contiguous(n) || v->ne[1] * 128 > silu->ne[0] || !ggml_vk_has_later_work(cgraph, j)) {
++            return nullptr;
++        }
++        return n;
++    }
++    return nullptr;
++}
++
+ static bool ggml_vk_can_conv_step(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx,
+                                   const ggml_tensor ** conv, const ggml_tensor ** silu, const ggml_tensor ** cpy) {
+     static const bool disabled = getenv("GGML_VK_DISABLE_CONV_STEP") != nullptr;
+     const ggml_tensor * cat = cgraph->nodes[node_idx];
+-    if (disabled || ctx->device->pipeline_conv_step_f32 == nullptr || cat->op != GGML_OP_CONCAT ||
++    if (disabled || ctx->device->pipeline_conv_step_f32 == nullptr || !ctx->device->subgroup_arithmetic || cat->op != GGML_OP_CONCAT ||
+         ggml_get_op_params_i32(cat, 0) != 0) {
+         return false;
+     }
+@@ -13509,7 +13534,8 @@ static bool ggml_vk_can_conv_step(const ggml_backend_vk_context * ctx, const str
+ }
+ 
+ static void ggml_vk_conv_step(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * cat,
+-                              const ggml_tensor * conv, const ggml_tensor * silu, const ggml_tensor * cpy) {
++                              const ggml_tensor * conv, const ggml_tensor * silu, const ggml_tensor * cpy,
++                              const ggml_tensor * l2) {
+     const ggml_tensor * st = cat->src[0];
+     const ggml_tensor * x = cat->src[1];
+     const ggml_tensor * w = conv->src[1];
+@@ -13523,11 +13549,19 @@ static void ggml_vk_conv_step(ggml_backend_vk_context * ctx, vk_context& subctx,
+         (uint32_t)(get_misalign_bytes(ctx, x) / sizeof(float)), (uint32_t)(x->nb[1] / sizeof(float)),
+         (uint32_t)(get_misalign_bytes(ctx, w) / sizeof(float)), (uint32_t)(w->nb[1] / sizeof(float)),
+         (uint32_t)(get_misalign_bytes(ctx, silu) / sizeof(float)),
++        l2 ? (uint32_t)l2->src[0]->ne[1] : 0u,
++        l2 ? (uint32_t)(get_misalign_bytes(ctx, l2) / sizeof(float)) : 0u,
++        l2 ? ggml_get_op_params_f32(l2, 0) : 0.0f,
+     };
++    const vk_subbuffer d_buf = ggml_vk_tensor_subbuffer(ctx, silu, true);
+     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+         { ggml_vk_tensor_subbuffer(ctx, st, true), ggml_vk_tensor_subbuffer(ctx, x, true),
+-          ggml_vk_tensor_subbuffer(ctx, w, true), ggml_vk_tensor_subbuffer(ctx, silu, true) },
++          ggml_vk_tensor_subbuffer(ctx, w, true), d_buf, l2 ? ggml_vk_tensor_subbuffer(ctx, l2, true) : d_buf },
+         pc, { C, 1, 1 });
++    if (l2) {
++        ctx->unsynced_nodes_written.push_back(l2);
++        ctx->skip_nodes.push_back(l2);
++    }
+ 
+     // what the skipped SSM_CONV+SILU and CPY would have written
+     ctx->unsynced_nodes_written.push_back(silu);
+@@ -16168,7 +16202,8 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+         {
+             const ggml_tensor * conv, * silu, * cpy;
+             if (ggml_vk_can_conv_step(ctx, cgraph, node_idx, &conv, &silu, &cpy)) {
+-                ggml_vk_conv_step(ctx, compute_ctx, node, conv, silu, cpy);
++                ggml_vk_conv_step(ctx, compute_ctx, node, conv, silu, cpy,
++                                  ggml_vk_conv_step_l2(cgraph, node_idx, silu));
+                 break;
+             }
+         }
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/conv_step.comp b/ggml/src/ggml-vulkan/vulkan-shaders/conv_step.comp
+index 3cb0fa0..664c59e 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/conv_step.comp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/conv_step.comp
+@@ -4,8 +4,15 @@
+ // SSM_CONV -> SILU chain plus the CPY that writes the shifted window back over the conv state, in one dispatch.
+ // One invocation per channel reads its 3-value window and the new input, writes silu(dot(window, w)) (the same
+ // arithmetic as ssm_conv.comp with APPLY_SILU) and shifts the window in place.
++// With l2_heads > 0 the first l2_heads 128-channel heads (q and k) are also L2-normalised per head, as the
++// L2_NORM that follows would (x / max(|x|, eps)), and written to the L2 output: one workgroup is one head.
+ 
+-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
++#extension GL_KHR_shader_subgroup_basic : require
++#extension GL_KHR_shader_subgroup_arithmetic : require
++
++#define WG 128
++
++layout(local_size_x = WG, local_size_y = 1, local_size_z = 1) in;
+ 
+ layout(push_constant) uniform parameter
+ {
+@@ -16,29 +23,49 @@ layout(push_constant) uniform parameter
+     uint w_off;
+     uint w_stride;
+     uint d_off;
++    uint l2_heads;
++    uint l2_off;
++    float eps;
+ };
+ 
+ layout(binding = 0, std430) buffer St { float data_st[]; };
+ layout(binding = 1, std430) readonly buffer X { float data_x[]; };
+ layout(binding = 2, std430) readonly buffer W { float data_w[]; };
+ layout(binding = 3, std430) writeonly buffer D { float data_d[]; };
++layout(binding = 4, std430) writeonly buffer L2 { float data_l2[]; };
++
++shared float red[WG / 32];
+ 
+ void main() {
+     const uint c = gl_GlobalInvocationID.x;
+-    if (c >= C) {
+-        return;
++    float y = 0.0;
++    if (c < C) {
++        const uint s = st_off + 3 * c;
++        const float s0 = data_st[s];
++        const float s1 = data_st[s + 1];
++        const float s2 = data_st[s + 2];
++        const float x = data_x[x_off + c * x_stride];
++        const uint wb = w_off + c * w_stride;
++
++        const float sum = dot(vec4(s0, s1, s2, x), vec4(data_w[wb], data_w[wb + 1], data_w[wb + 2], data_w[wb + 3]));
++        y = sum / (1.0f + exp(-sum));
++        data_d[d_off + c] = y;
++
++        data_st[s] = s1;
++        data_st[s + 1] = s2;
++        data_st[s + 2] = x;
++    }
++
++    if (gl_WorkGroupID.x < l2_heads) {   // uniform per workgroup
++        const float ss = subgroupAdd(y * y);
++        if (gl_SubgroupInvocationID == 0) {
++            red[gl_SubgroupID] = ss;
++        }
++        barrier();
++        float total = 0.0;
++        for (uint i = 0; i < gl_NumSubgroups; ++i) {
++            total += red[i];
++        }
++        data_l2[l2_off + c] = y / max(sqrt(total), eps);
+     }
+-    const uint s = st_off + 3 * c;
+-    const float s0 = data_st[s];
+-    const float s1 = data_st[s + 1];
+-    const float s2 = data_st[s + 2];
+-    const float x = data_x[x_off + c * x_stride];
+-    const uint wb = w_off + c * w_stride;
+-
+-    const float sum = dot(vec4(s0, s1, s2, x), vec4(data_w[wb], data_w[wb + 1], data_w[wb + 2], data_w[wb + 3]));
+-    data_d[d_off + c] = sum / (1.0f + exp(-sum));
+-
+-    data_st[s] = s1;
+-    data_st[s + 1] = s2;
+-    data_st[s + 2] = x;
+ }
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index d7bc7b8..7f72e62 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -4994,9 +4994,10 @@ struct test_conv_step : public test_case {
+ 
+     ggml_tensor * silu_out = nullptr;
+     ggml_tensor * cache_out = nullptr;
++    ggml_tensor * l2_out = nullptr;
+ 
+     std::vector<ggml_tensor *> fusion_test_nodes() override {
+-        return { silu_out, cache_out };
++        return { silu_out, cache_out, l2_out };
+     }
+ 
+     ggml_tensor * build_graph(ggml_context * ctx) override {
+@@ -5009,7 +5010,12 @@ struct test_conv_step : public test_case {
+         silu_out = ggml_silu(ctx, ggml_ssm_conv(ctx, cat, w));
+         ggml_tensor * last = ggml_view_3d(ctx, cat, 3, C, 1, cat->nb[1], cat->nb[2], ggml_row_size(cat->type, 1));
+         cache_out = ggml_cpy(ctx, last, ggml_view_2d(ctx, cache, 3 * C, 1, cache->nb[1], cache->nb[1]));
+-        ggml_tensor * out = ggml_add(ctx, ggml_sum(ctx, silu_out), ggml_sum(ctx, cache_out));
++        // q and k: the first 2 * 16 heads of 128 channels, L2-normalised per head (as qwen35 does)
++        const int64_t l2_heads = std::min<int64_t>(32, C / 128);
++        ggml_tensor * qk = ggml_view_4d(ctx, silu_out, 128, l2_heads, 1, 1, 128 * sizeof(float), silu_out->nb[1],
++                                        silu_out->nb[1], 0);
++        l2_out = ggml_l2_norm(ctx, qk, 1e-6f);
++        ggml_tensor * out = ggml_add(ctx, ggml_add(ctx, ggml_sum(ctx, silu_out), ggml_sum(ctx, cache_out)), ggml_sum(ctx, l2_out));
+         ggml_set_name(out, "out");
+         return out;
+     }
+@@ -9536,7 +9542,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+         test_cases.emplace_back(new test_gdn_inplace(nt));
+     }
+     test_cases.emplace_back(new test_conv_step(10240));
+-    test_cases.emplace_back(new test_conv_step(100));
++    test_cases.emplace_back(new test_conv_step(384));
+     for (bool mmvq : {false, true}) {
+         for (int64_t nt : {1, 3}) {
+             test_cases.emplace_back(new test_glu_fwht(17408, nt, mmvq));
+-- 
+2.53.0
+

@@ -1,0 +1,26 @@
+From 3e12df1c2d9c2ec8a198473a5070cfe3e96af1a8 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 08:42:42 +0000
+Subject: [PATCH 13/24] vulkan: let the PQ2_0 MMQ pipelines be created (shmem
+ support table was missing PQ2_0)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 9830123..cb42301 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -4040,6 +4040,7 @@ static bool ggml_vk_matmul_int_shmem_support(const vk_device& device, const std:
+     uint32_t block_a_size = 0;
+     switch (src0_type) {
+         case GGML_TYPE_Q2_0:    block_a_size = std430_size({{32, 4}, {fp_size,  fp_align}});                  break; // qs[8] + dm
++        case GGML_TYPE_PQ2_0:   block_a_size = std430_size({{32, 4}, {fp_size,  fp_align}});                  break; // same cache as Q2_0
+         case GGML_TYPE_Q4_0:    block_a_size = std430_size({{16, 4}, {fp_size,  fp_align}});                  break; // qs[16/4] + dm
+         case GGML_TYPE_Q4_1:    block_a_size = std430_size({{16, 4}, {fp2_size, fp2_align}});                 break; // qs[16/4] + dm(vec2)
+         case GGML_TYPE_Q5_0:    block_a_size = std430_size({{16, 4}, {4, 4}, {fp_size,  fp_align}});          break; // qs[16/4] + qh + dm
+-- 
+2.53.0
+

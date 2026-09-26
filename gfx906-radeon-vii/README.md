@@ -40,7 +40,7 @@ coopmat 非対応 / subgroup min = max = 64 / ROCm 5.7 で打ち切り
 |---|---|---|---|
 | [Qwen3.8-27B](qwen3.8-27b/) | 26.26 t/s | 173.19 t/s | 混合線形アテンション。[API 常駐構成](qwen3.8-27b/docs/serving.md)あり |
 | [Qwen3-8B](qwen3-8b/) | — | — | 比較用。通常の Transformer |
-| [Bonsai 2 27B](bonsai-2-27b/) | 31.38 t/s | 105.14 t/s | Qwen3.8-27B の三値版。PrismML のフォークが要る |
+| [Bonsai 2 27B](bonsai-2-27b/) | 47.24 t/s | 250.1 t/s | Qwen3.8-27B の三値版。PrismML のフォークが要る |
 
 ## ツール
 

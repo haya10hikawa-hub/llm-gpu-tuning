@@ -1,0 +1,66 @@
+From 2e88b8ddb3879d6b834c0e6ea107827ec6d6b211 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 05:07:14 +0000
+Subject: [PATCH 08/24] vulkan: FA decode knobs (split_k target, GCN occupancy
+ limit); tests: decode-shape FA perf cases
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 12 ++++++++----
+ tests/test-backend-ops.cpp           |  7 +++++++
+ 2 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 4b49267..4cac40c 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -3799,7 +3799,7 @@ static vk_fa_tuning_params get_fa_tuning_params_scalar(const vk_device& device,
+             // 30kb target for hsk > 64, 26kb for <= 64 due to smaller workgroup size
+             // Values are guessed, tested on RDNA2
+             result.limit_occupancy_shmem = (hsk <= 64 ? 26 : 30) * 1024 / 4 / 4;
+-        } else if (device->architecture == AMD_GCN && n_rows <= 8 && hsk >= 256) {
++        } else if (device->architecture == AMD_GCN && n_rows <= 8 && hsk >= 256 && getenv("GGML_VK_FA_NO_OCC_LIMIT") == nullptr) {
+             // Same thing for GCN, with an occupancy target of 2 subgroups per SIMD.
+             // Here low-batch FA with large head size is affected.
+             // n_rows < 4 switch because workgroup size switches from 128 to 256 there.
+@@ -11163,12 +11163,16 @@ static void ggml_vk_flash_attn(ggml_backend_vk_context * ctx, vk_context& subctx
+     const uint32_t Tr = CEIL_DIV(N, Br);
+ 
+     // Try to use split_k when KV is large enough to be worth the overhead.
++    static const uint32_t split_mult = [] {
++        const char * e = getenv("GGML_VK_FA_SPLITK_MULT");
++        return e ? (uint32_t) std::max(1, atoi(e)) : 2u;
++    }();
+     if (gqa_ratio > 1 && workgroups_x <= Br) {
+-        split_k = shader_core_count * 2 / (workgroups_x * workgroups_y * workgroups_z);
++        split_k = shader_core_count * split_mult / (workgroups_x * workgroups_y * workgroups_z);
+     } else if (gqa_ratio <= 1) {
+         uint32_t total_wgs_no_split = Tr * workgroups_y * workgroups_z;
+-        if (total_wgs_no_split < shader_core_count * 2) {
+-            split_k = shader_core_count * 2 / total_wgs_no_split;
++        if (total_wgs_no_split < shader_core_count * split_mult) {
++            split_k = shader_core_count * split_mult / total_wgs_no_split;
+         }
+     }
+ 
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index a4964f7..922673c 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -10320,6 +10320,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+             test_cases.emplace_back(new test_fwht_signed(1024, width, 1));
+         }
+         test_cases.emplace_back(new test_fwht_signed(1024, 5120, 512));
++        // flash attention at the decode shape of Qwen3.8-27B / Bonsai 2 27B: head 256, 24 q heads over 4 kv heads
++        for (ggml_type kvt : {GGML_TYPE_Q4_0, GGML_TYPE_Q8_0}) {
++            for (int64_t kv : {4096, 16384, 32768}) {
++                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, kv, 1, true, false, 0.0f, 0.0f,
++                                                                GGML_PREC_DEFAULT, kvt, kvt));
++            }
++        }
+         // bandwidth probes: nearly compute-free streaming reads of the same size class
+         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 17408, 1, 5120, {1, 1}, {1, 1}));
+         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 17408, 1, 5120, {1, 1}, {1, 1}));
+-- 
+2.53.0
+

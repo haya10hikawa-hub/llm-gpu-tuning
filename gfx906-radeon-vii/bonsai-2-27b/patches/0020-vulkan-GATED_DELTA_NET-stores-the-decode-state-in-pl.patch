@@ -1,0 +1,281 @@
+From 00caada789ae31fcd4bfe3c68ad73ce6e09780ef Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 11:04:14 +0000
+Subject: [PATCH 20/24] vulkan: GATED_DELTA_NET stores the decode state in
+ place and the write-back CPY is skipped
+
+When the K=1 new state is copied straight back over the state input (an identity view of the cache row) and
+nothing else reads either, gated_delta_net.comp stores the final state into the state binding (every lane
+rewrites exactly the elements it read) and build_graph skips the CPY: -48 launches and ~300 MB of traffic per
+Bonsai decode token. GGML_VK_DISABLE_GDN_INPLACE turns it off. Test: GDN_INPLACE.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp          | 77 ++++++++++++++++++-
+ .../vulkan-shaders/gated_delta_net.comp       |  9 ++-
+ tests/test-backend-ops.cpp                    | 72 +++++++++++++++++
+ 3 files changed, 152 insertions(+), 6 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 773a0de..1223d43 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1906,6 +1906,7 @@ struct vk_op_gated_delta_net_push_constants {
+     uint32_t neq1, rq3;
+     float scale;
+     uint32_t K;
++    uint32_t state_inplace;
+ };
+ 
+ struct vk_op_ssm_scan_push_constants {
+@@ -2442,6 +2443,8 @@ struct ggml_backend_vk_context {
+     topk_moe_mode fused_topk_moe_mode {};
+     bool fused_topk_moe_scale {};
+     bool fused_mul_fwht {};
++    // CPY node made redundant by a GATED_DELTA_NET that stored its state in place
++    const ggml_tensor * gdn_inplace_skip {};
+     bool fused_glu_fwht {};
+     bool fused_norm_fwht {};
+     bool fused_norm_fwht_dual {};
+@@ -13241,7 +13244,60 @@ static void ggml_vk_gated_linear_attn(ggml_backend_vk_context * ctx, vk_context&
+         pc, { (uint32_t)(n_seqs * n_heads), 1, 1 });
+ }
+ 
+-static void ggml_vk_gated_delta_net(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
++static int ggml_vk_node_index(const struct ggml_cgraph * cgraph, const ggml_tensor * t, int hint) {
++    for (int j = std::max(0, hint - 64); j < cgraph->n_nodes; j++) {
++        if (cgraph->nodes[j] == t) {
++            return j;
++        }
++    }
++    return -1;
++}
++
++// K == 1 GATED_DELTA_NET whose new state is copied straight back over its state input (the cache row, when the
++// state is an identity view of it): returns the CPY node that becomes a no-op if the shader stores the state in
++// place, or nullptr. Nothing else may read the old state or the new-state view.
++static const ggml_tensor * ggml_vk_gdn_inplace_cpy(const struct ggml_cgraph * cgraph, int node_idx) {
++    static const bool disabled = getenv("GGML_VK_DISABLE_GDN_INPLACE") != nullptr;
++    if (disabled || cgraph == nullptr) {
++        return nullptr;
++    }
++    const ggml_tensor * gdn = cgraph->nodes[node_idx];
++    const ggml_tensor * st = gdn->src[5];
++    if (ggml_get_op_params_i32(gdn, 0) != 1 || gdn->src[6] != nullptr || st->type != GGML_TYPE_F32 ||
++        !ggml_is_contiguous(st) || st->buffer == nullptr) {
++        return nullptr;
++    }
++    const ggml_tensor * v = gdn->src[2];
++    const size_t state_offs = (size_t)v->ne[0] * v->ne[1] * v->ne[2] * v->ne[3] * sizeof(float);
++    const int st_idx = ggml_vk_node_index(cgraph, st, 0);
++    if (st_idx >= 0 && ggml_node_get_use_count(cgraph, st_idx) != 1) {
++        return nullptr;
++    }
++    for (int j = node_idx + 1; j < cgraph->n_nodes && j <= node_idx + 48; j++) {
++        const ggml_tensor * c = cgraph->nodes[j];
++        if (c->op != GGML_OP_CPY) {
++            continue;
++        }
++        const ggml_tensor * ns = c->src[0];
++        if (ns->view_src != gdn || ns->view_offs != state_offs || ns->type != GGML_TYPE_F32 || !ggml_is_contiguous(ns) ||
++            ggml_nbytes(ns) != ggml_nbytes(st)) {
++            continue;
++        }
++        const int ns_idx = ggml_vk_node_index(cgraph, ns, node_idx);
++        if (ns_idx < 0 || ggml_node_get_use_count(cgraph, ns_idx) != 1) {
++            return nullptr;
++        }
++        if (c->type != GGML_TYPE_F32 || !ggml_is_contiguous(c) || c->buffer != st->buffer || c->data != st->data ||
++            ggml_nbytes(c) != ggml_nbytes(st)) {
++            return nullptr;
++        }
++        return c;
++    }
++    return nullptr;
++}
++
++static void ggml_vk_gated_delta_net(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst,
++                                    const struct ggml_cgraph * cgraph = nullptr, int node_idx = -1) {
+     const ggml_tensor * src_q     = dst->src[0];
+     const ggml_tensor * src_v     = dst->src[2];
+     const ggml_tensor * src_beta  = dst->src[4];
+@@ -13283,14 +13339,15 @@ static void ggml_vk_gated_delta_net(ggml_backend_vk_context * ctx, vk_context& s
+     const uint32_t rq3  = (uint32_t)(src_v->ne[3] / src_q->ne[3]);
+ 
+     const float scale = 1.0f / sqrtf((float)S_v);
+-    const vk_op_gated_delta_net_push_constants pc = {
++    vk_op_gated_delta_net_push_constants pc = {
+         H, n_tokens, n_seqs, s_off,
+         sq1, sq2, sq3,
+         sv1, sv2, sv3,
+         sb1, sb2, sb3,
+         neq1, rq3,
+         scale,
+-        K
++        K,
++        0u,
+     };
+ 
+     // raw gates bind dt_bias (src[7]) and a (src[8]); otherwise those bindings are unused placeholders
+@@ -13298,6 +13355,13 @@ static void ggml_vk_gated_delta_net(ggml_backend_vk_context * ctx, vk_context& s
+     const vk_subbuffer dt_buf = raw_gates ? ggml_vk_tensor_subbuffer(ctx, dst->src[7]) : src_buf[4];
+     const vk_subbuffer a_buf  = raw_gates ? ggml_vk_tensor_subbuffer(ctx, dst->src[8]) : src_buf[4];
+ 
++    // the state CPY that follows becomes a no-op: build_graph skips it
++    ctx->gdn_inplace_skip = nullptr;
++    if (const ggml_tensor * cpy = ggml_vk_gdn_inplace_cpy(cgraph, node_idx)) {
++        pc.state_inplace = 1;
++        ctx->gdn_inplace_skip = cpy;
++    }
++
+     ggml_vk_dispatch_pipeline(ctx, subctx, pipeline,
+         {src_buf[0], src_buf[1], src_buf[2], src_buf[3], src_buf[4], src_buf[5], dst_buf, dt_buf, a_buf},
+         pc, { H, n_seqs, S_v });
+@@ -16051,6 +16115,11 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+     case GGML_OP_CPY:
+     case GGML_OP_CONT:
+     case GGML_OP_DUP:
++        if (node == ctx->gdn_inplace_skip) {
++            // the GATED_DELTA_NET before already stored this state in place
++            ctx->gdn_inplace_skip = nullptr;
++            break;
++        }
+         ggml_vk_cpy(ctx, compute_ctx, src0, node);
+ 
+         break;
+@@ -16282,7 +16351,7 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+         break;
+ 
+     case GGML_OP_GATED_DELTA_NET:
+-        ggml_vk_gated_delta_net(ctx, compute_ctx, node);
++        ggml_vk_gated_delta_net(ctx, compute_ctx, node, cgraph, node_idx);
+ 
+         break;
+ 
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp b/ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp
+index 59bc0e9..f9737d0 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/gated_delta_net.comp
+@@ -34,6 +34,7 @@ layout(push_constant) uniform Parameters {
+     uint neq1, rq3;
+     float scale;
+     uint K;
++    uint state_inplace; // K == 1: store the final state over the state input (each lane rewrites what it read)
+ };
+ 
+ layout(binding = 0) readonly  buffer QBuf     { FLOAT_TYPE data_q[];     };
+@@ -41,7 +42,7 @@ layout(binding = 1) readonly  buffer KBuf     { FLOAT_TYPE data_k[];     };
+ layout(binding = 2) readonly  buffer VBuf     { FLOAT_TYPE data_v[];     };
+ layout(binding = 3) readonly  buffer GBuf     { FLOAT_TYPE data_g[];     };
+ layout(binding = 4) readonly  buffer BetaBuf  { FLOAT_TYPE data_beta[];  };
+-layout(binding = 5) readonly  buffer StateBuf { FLOAT_TYPE data_state[]; };
++layout(binding = 5)           buffer StateBuf { FLOAT_TYPE data_state[]; };
+ layout(binding = 6)           buffer DstBuf   { FLOAT_TYPE data_dst[];   };
+ layout(binding = 7) readonly  buffer DtBuf    { FLOAT_TYPE data_dt[];    };
+ layout(binding = 8) readonly  buffer ABuf     { FLOAT_TYPE data_ga[];    };
+@@ -193,7 +194,11 @@ void main() {
+         }
+     }
+ 
+-    if (K == 1u) {
++    if (K == 1u && state_inplace != 0u) {
++        [[unroll]] for (uint r = 0; r < ROWS_PER_LANE; r++) {
++            data_state[state_in_base + col * S_V + r * LANES_PER_COLUMN + lane] = s_shard[r];
++        }
++    } else if (K == 1u) {
+         [[unroll]] for (uint r = 0; r < ROWS_PER_LANE; r++) {
+             data_dst[s_off + state_out_base + col * S_V + r * LANES_PER_COLUMN + lane] = s_shard[r];
+         }
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 3cde6c9..c4a2b58 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -4905,6 +4905,75 @@ struct test_glu_fwht : public test_fwht_signed {
+     }
+ };
+ 
++// decode-shaped GATED_DELTA_NET whose state is read from a cache row and copied straight back into it, the shape
++// where the Vulkan backend stores the state in place and skips the copy; verifies the cache after the copy and
++// the attention output
++struct test_gdn_inplace : public test_case {
++    const int64_t n_tokens;
++
++    test_gdn_inplace(int64_t n_tokens = 1) : n_tokens(n_tokens) {}
++
++    std::string vars() override {
++        return VARS_TO_STR1(n_tokens);
++    }
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "GDN_INPLACE";
++    }
++
++    bool run_whole_graph() override { return true; }
++
++    ggml_tensor * cache_out = nullptr;
++    ggml_tensor * attn_out  = nullptr;
++
++    std::vector<ggml_tensor *> fusion_test_nodes() override {
++        return { attn_out, cache_out };
++    }
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        const int64_t S = 128, H_k = 16, H_v = 48, D = S * S * H_v;
++        ggml_tensor * q = ggml_l2_norm(ctx, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, S, H_k, n_tokens, 1), 1e-6f);
++        ggml_tensor * k = ggml_l2_norm(ctx, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, S, H_k, n_tokens, 1), 1e-6f);
++        ggml_tensor * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, S, H_v, n_tokens, 1);
++        ggml_tensor * g = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 1, H_v, n_tokens, 1);
++        ggml_tensor * b = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 1, H_v, n_tokens, 1);
++        ggml_set_name(g, "g");
++        ggml_set_name(b, "beta");
++        ggml_tensor * cache = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, D, 3);
++        ggml_set_name(cache, "cache");
++        // row 1 of the cache, as a [S, S, H_v, 1] state
++        ggml_tensor * row = ggml_view_2d(ctx, cache, D, 1, cache->nb[1], cache->nb[1]);
++        ggml_tensor * st = ggml_reshape_4d(ctx, row, S, S, H_v, 1);
++        ggml_tensor * r = ggml_gated_delta_net(ctx, q, k, v, g, b, st, 1);
++        attn_out = ggml_view_4d(ctx, r, S, H_v, n_tokens, 1, ggml_row_size(r->type, S), ggml_row_size(r->type, S * H_v),
++                                ggml_row_size(r->type, S * H_v * n_tokens), 0);
++        attn_out = ggml_cont(ctx, attn_out);
++        ggml_tensor * ns = ggml_view_2d(ctx, r, D, 1, ggml_row_size(r->type, D), ggml_row_size(r->type, S * H_v * n_tokens));
++        cache_out = ggml_cpy(ctx, ns, ggml_view_2d(ctx, cache, D, 1, cache->nb[1], cache->nb[1]));
++        ggml_set_name(cache_out, "cache_out");
++        // one output that depends on both
++        ggml_tensor * out = ggml_add(ctx, ggml_sum(ctx, attn_out), ggml_sum(ctx, cache_out));
++        ggml_set_name(out, "out");
++        return out;
++    }
++
++    void initialize_tensors(ggml_context * ctx) override {
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
++            if (ggml_is_view_op(t->op)) { continue; }
++            if (strcmp(t->name, "g") == 0) {
++                init_tensor_uniform(t, -1.0f, -0.1f);
++            } else if (strcmp(t->name, "beta") == 0) {
++                init_tensor_uniform(t, 0.1f, 0.9f);
++            } else if (strcmp(t->name, "cache") == 0) {
++                init_tensor_uniform(t, -0.1f, 0.1f);
++            } else {
++                init_tensor_uniform(t);
++            }
++        }
++    }
++};
++
+ static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats) {
+     std::random_device rd;
+     std::default_random_engine rng(rd());
+@@ -9422,6 +9491,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+             }
+         }
+     }
++    for (int64_t nt : {1, 4}) {
++        test_cases.emplace_back(new test_gdn_inplace(nt));
++    }
+     for (bool mmvq : {false, true}) {
+         for (int64_t nt : {1, 3}) {
+             test_cases.emplace_back(new test_glu_fwht(17408, nt, mmvq));
+-- 
+2.53.0
+

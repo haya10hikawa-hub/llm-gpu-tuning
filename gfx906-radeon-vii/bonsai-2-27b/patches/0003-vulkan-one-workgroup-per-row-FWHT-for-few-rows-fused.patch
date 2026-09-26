@@ -1,0 +1,330 @@
+From 43448cd7a1cb20d3f737c48c10ff04d23b15e4d9 Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 04:02:57 +0000
+Subject: [PATCH 03/24] vulkan: one-workgroup-per-row FWHT for few rows, fused
+ with the preceding sign MUL
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp          | 106 +++++++++++++++++-
+ .../ggml-vulkan/vulkan-shaders/fwht_row.comp  |  99 ++++++++++++++++
+ .../vulkan-shaders/vulkan-shaders-gen.cpp     |   2 +
+ tests/test-backend-ops.cpp                    |   8 ++
+ 4 files changed, 214 insertions(+), 1 deletion(-)
+ create mode 100644 ggml/src/ggml-vulkan/vulkan-shaders/fwht_row.comp
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 6bd8bad..4b49267 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1056,6 +1056,9 @@ struct vk_device_struct {
+     vk_pipeline pipeline_fwht_f16[GGML_VK_FWHT_NUM_SIZES];
+     // rows a workgroup covers, chosen per width when the pipeline is built
+     uint32_t fwht_rows_per_wg[GGML_VK_FWHT_NUM_SIZES] = {};
++    // one workgroup per row (fwht_row.comp): few-row decode case, optionally with the sign flip fused in
++    vk_pipeline pipeline_fwht_row_f32[GGML_VK_FWHT_NUM_SIZES];
++    vk_pipeline pipeline_fwht_row_signed_f32[GGML_VK_FWHT_NUM_SIZES];
+     vk_pipeline pipeline_cumsum_f32;
+     vk_pipeline pipeline_cumsum_small_f32;
+     vk_pipeline pipeline_cumsum_multipass1_f32;
+@@ -1417,6 +1420,15 @@ struct vk_op_fwht_push_constants {
+     float scale;
+ };
+ 
++struct vk_op_fwht_row_push_constants {
++    uint32_t n_rows;
++    uint32_t src_offset;
++    uint32_t dst_offset;
++    uint32_t sign_offset;
++    uint32_t rows_per_token;
++    float scale;
++};
++
+ struct vk_op_count_experts_push_constants {
+     uint32_t ne00;
+     uint32_t ne01;
+@@ -2405,6 +2417,7 @@ struct ggml_backend_vk_context {
+     int fused_ops_write_mask {};
+     topk_moe_mode fused_topk_moe_mode {};
+     bool fused_topk_moe_scale {};
++    bool fused_mul_fwht {};
+ 
+     // for GGML_VK_PERF_LOGGER
+     std::unique_ptr<vk_perf_logger> perf_logger;
+@@ -5846,6 +5859,11 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+                     device->fwht_rows_per_wg[idx] = rows;
+                 }
+             }
++            if (use_subgroup && n % 256 == 0 && n / 256 <= 16 && device->properties.limits.maxComputeWorkGroupInvocations >= 256 &&
++                n * sizeof(float) <= device->properties.limits.maxComputeSharedMemorySize) {
++                ggml_vk_create_pipeline(device, device->pipeline_fwht_row_f32[idx], "fwht_row_f32", fwht_row_f32_len, fwht_row_f32_data, "main", 2, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
++                ggml_vk_create_pipeline(device, device->pipeline_fwht_row_signed_f32[idx], "fwht_row_signed_f32", fwht_row_signed_f32_len, fwht_row_signed_f32_data, "main", 3, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
++            }
+             ++idx;
+         }
+     }
+@@ -10095,8 +10113,83 @@ static bool ggml_vk_can_use_fwht(const ggml_backend_vk_context * ctx, const ggml
+     return true;
+ }
+ 
++static uint32_t ggml_vk_fwht_row_max() {
++    static const uint32_t v = [] {
++        const char * e = getenv("GGML_VK_FWHT_ROW_MAX");
++        return e ? (uint32_t) atoi(e) : 64u;
++    }();
++    return v;
++}
++
++// FWHT of rows of length N = rot->ne[0]; with signs != nullptr the rows are first multiplied by the
++// [width] sign vector (broadcast over tokens), which is what the fused MUL did.
++static void ggml_vk_fwht_row(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src, const ggml_tensor * signs,
++                             int64_t n, ggml_tensor * dst) {
++    const int idx = ggml_vk_fwht_pipeline_idx(n);
++    vk_pipeline pipeline = signs ? ctx->device->pipeline_fwht_row_signed_f32[idx] : ctx->device->pipeline_fwht_row_f32[idx];
++    GGML_ASSERT(pipeline != nullptr);
++
++    const uint32_t n_rows = (uint32_t)(ggml_nelements(src) / n);
++    const uint32_t workgroups_x = std::min(n_rows, ctx->device->properties.limits.maxComputeWorkGroupCount[0]);
++    ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
++
++    const vk_subbuffer src_buf = ggml_vk_tensor_subbuffer(ctx, src, true);
++    const vk_subbuffer dst_buf = ggml_vk_tensor_subbuffer(ctx, dst, true);
++
++    vk_op_fwht_row_push_constants pc = {
++        n_rows,
++        (uint32_t)(get_misalign_bytes(ctx, src) / ggml_type_size(src->type)),
++        (uint32_t)(get_misalign_bytes(ctx, dst) / ggml_type_size(dst->type)),
++        signs ? (uint32_t)(get_misalign_bytes(ctx, signs) / ggml_type_size(signs->type)) : 0u,
++        signs ? (uint32_t)(signs->ne[0] / n) : 1u,
++        1.0f / std::sqrt((float)n),
++    };
++
++    if (signs) {
++        const vk_subbuffer sign_buf = ggml_vk_tensor_subbuffer(ctx, signs, true);
++        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf, sign_buf }, pc, { workgroups_x, 1, 1 });
++    } else {
++        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf }, pc, { workgroups_x, 1, 1 });
++    }
++}
++
++// {MUL(x, signs), RESHAPE, MUL_MAT(rot, .) with the Hadamard hint} -> one fwht_row_signed dispatch
++static bool ggml_vk_can_fuse_mul_fwht(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    static const bool disabled = getenv("GGML_VK_DISABLE_MUL_FWHT") != nullptr;
++    if (disabled || !ggml_can_fuse(cgraph, node_idx, { GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT })) {
++        return false;
++    }
++    const ggml_tensor * mul = cgraph->nodes[node_idx];
++    const ggml_tensor * rs  = cgraph->nodes[node_idx + 1];
++    const ggml_tensor * mm  = cgraph->nodes[node_idx + 2];
++    if (ggml_get_op_params_i32(mm, 1) != GGML_HINT_SRC0_IS_HADAMARD || mm->src[1] != rs || rs->src[0] != mul) {
++        return false;
++    }
++    const ggml_tensor * x = mul->src[0];
++    const ggml_tensor * signs = mul->src[1];
++    const int64_t n = mm->src[0]->ne[0];
++    const int idx = ggml_vk_fwht_pipeline_idx(n);
++    if (idx < 0 || ctx->device->pipeline_fwht_row_signed_f32[idx] == nullptr) {
++        return false;
++    }
++    if (x->type != GGML_TYPE_F32 || signs->type != GGML_TYPE_F32 || mul->type != GGML_TYPE_F32 || mm->type != GGML_TYPE_F32) {
++        return false;
++    }
++    if (!ggml_is_contiguous(x) || !ggml_is_contiguous(signs) || !ggml_is_contiguous(mm) || ggml_nrows(signs) != 1 ||
++        signs->ne[0] != x->ne[0] || x->ne[0] % n != 0) {
++        return false;
++    }
++    const uint32_t n_rows = (uint32_t)(ggml_nelements(x) / n);
++    return n_rows <= ggml_vk_fwht_row_max();
++}
++
+ static void ggml_vk_fwht(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src, ggml_tensor * dst) {
+     const int idx = ggml_vk_fwht_pipeline_idx(src->ne[0]);
++    if (src->type == GGML_TYPE_F32 && ctx->device->pipeline_fwht_row_f32[idx] != nullptr &&
++        (uint32_t)ggml_nrows(src) <= ggml_vk_fwht_row_max()) {
++        ggml_vk_fwht_row(ctx, subctx, src, nullptr, src->ne[0], dst);
++        return;
++    }
+     vk_pipeline pipeline = src->type == GGML_TYPE_F16 ? ctx->device->pipeline_fwht_f16[idx] : ctx->device->pipeline_fwht_f32[idx];
+ 
+     const uint32_t rows_per_workgroup = ctx->device->fwht_rows_per_wg[idx];
+@@ -15584,7 +15677,10 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+ 
+         break;
+     case GGML_OP_MUL:
+-        if (ctx->num_additional_fused_ops) {
++        if (ctx->fused_mul_fwht) {
++            ggml_tensor * mm = cgraph->nodes[node_idx + 2];
++            ggml_vk_fwht_row(ctx, compute_ctx, src0, src1, mm->src[0]->ne[0], mm);
++        } else if (ctx->num_additional_fused_ops) {
+             ggml_vk_snake_dispatch_fused(ctx, compute_ctx, cgraph, node_idx);
+         } else {
+             ggml_vk_mul(ctx, compute_ctx, src0, src1, node);
+@@ -17339,6 +17435,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+ 
+         ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
+         ctx->fused_topk_moe_scale = false;
++        ctx->fused_mul_fwht = false;
+         const char *fusion_string {};
+         if (!ctx->device->disable_fusion) {
+             uint32_t num_adds = ggml_vk_fuse_multi_add(ctx, cgraph, i);
+@@ -17346,6 +17443,12 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 ctx->num_additional_fused_ops = num_adds - 1;
+                 fusion_string = "MULTI_ADD";
+                 std::fill_n(op_srcs_fused_elementwise, ctx->num_additional_fused_ops + 1, true);
++            } else if (ggml_vk_can_fuse_mul_fwht(ctx, cgraph, i)) {
++                ctx->num_additional_fused_ops = 2;
++                ctx->fused_mul_fwht = true;
++                fusion_string = "MUL_FWHT";
++                // each output row reads a whole input row, so the sources must not alias the output
++                std::fill_n(op_srcs_fused_elementwise, 3, false);
+             } else if (ggml_vk_can_fuse(ctx, cgraph, i, { GGML_OP_MUL_MAT, GGML_OP_ADD, GGML_OP_ADD })) {
+                 ctx->num_additional_fused_ops = 2;
+                 fusion_string = "MUL_MAT_ADD_ADD";
+@@ -17544,6 +17647,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 ctx->fused_ops_write_mask = 1;
+                 ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
+                 ctx->fused_topk_moe_scale = false;
++                ctx->fused_mul_fwht = false;
+             }
+         }
+ 
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/fwht_row.comp b/ggml/src/ggml-vulkan/vulkan-shaders/fwht_row.comp
+new file mode 100644
+index 0000000..e430270
+--- /dev/null
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/fwht_row.comp
+@@ -0,0 +1,99 @@
++#version 450
++
++// FWHT with one 256-invocation workgroup per row, for the few-row (decode) case.
++//
++// fwht.comp gives each row to a single subgroup, so a decode step with 5-17 rows keeps only a
++// handful of CUs busy and every row walks a 16-element-per-lane chain. Here a row of N elements
++// is spread over 256 invocations (N/256 elements each):
++//   element e = tid + 256*i
++//   strides h <  subgroup size : subgroupShuffleXor between lanes
++//   strides h <  256           : exchange through shared memory
++//   strides h >= 256           : butterflies inside the invocation's registers
++// With FWHT_SIGNED the preceding sign flip (MUL by a [width] vector broadcast over tokens) is
++// applied while loading, so the MUL node and its intermediate tensor disappear.
++
++#extension GL_EXT_control_flow_attributes : require
++#extension GL_KHR_shader_subgroup_basic : require
++#extension GL_KHR_shader_subgroup_shuffle : require
++
++layout(constant_id = 0) const uint N = 1024;
++
++#define WG 256
++const uint EL = N / WG;
++
++layout(local_size_x = WG, local_size_y = 1, local_size_z = 1) in;
++
++layout(push_constant) uniform parameter
++{
++    uint n_rows;
++    uint src_offset;
++    uint dst_offset;
++    uint sign_offset;
++    uint rows_per_token; // sign vector length / N
++    float scale;
++};
++
++layout(binding = 0, std430) readonly buffer A { float data_a[]; };
++layout(binding = 1, std430) writeonly buffer D { float data_d[]; };
++#ifdef FWHT_SIGNED
++layout(binding = 2, std430) readonly buffer S { float data_s[]; };
++#endif
++
++shared float shmem[N];
++
++void main() {
++    const uint tid = gl_LocalInvocationID.x;
++    const uint sg = gl_SubgroupSize;
++
++    for (uint row = gl_WorkGroupID.x; row < n_rows; row += gl_NumWorkGroups.x) {
++        const uint row_offset = row * N;
++#ifdef FWHT_SIGNED
++        const uint sign_row = (row % rows_per_token) * N;
++#endif
++
++        float reg[EL];
++        [[unroll]] for (uint i = 0; i < EL; ++i) {
++            const uint e = tid + WG * i;
++            float v = data_a[src_offset + row_offset + e] * scale;
++#ifdef FWHT_SIGNED
++            v *= data_s[sign_offset + sign_row + e];
++#endif
++            reg[i] = v;
++        }
++
++        [[unroll]] for (uint h = 1; h < WG; h <<= 1) {
++            const bool upper = (tid & h) != 0;
++            if (h < sg) {
++                [[unroll]] for (uint i = 0; i < EL; ++i) {
++                    const float other = subgroupShuffleXor(reg[i], h);
++                    reg[i] = upper ? other - reg[i] : reg[i] + other;
++                }
++            } else {
++                [[unroll]] for (uint i = 0; i < EL; ++i) {
++                    shmem[tid + WG * i] = reg[i];
++                }
++                barrier();
++                [[unroll]] for (uint i = 0; i < EL; ++i) {
++                    const float other = shmem[(tid ^ h) + WG * i];
++                    reg[i] = upper ? other - reg[i] : reg[i] + other;
++                }
++                barrier();
++            }
++        }
++
++        [[unroll]] for (uint step = 1; step < EL; step <<= 1) {
++            [[unroll]] for (uint i = 0; i < EL; ++i) {
++                if ((i & step) == 0) {
++                    const float x = reg[i];
++                    const float y = reg[i + step];
++                    reg[i] = x + y;
++                    reg[i + step] = x - y;
++                }
++            }
++        }
++
++        [[unroll]] for (uint i = 0; i < EL; ++i) {
++            data_d[dst_offset + row_offset + tid + WG * i] = reg[i];
++        }
++    }
++}
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index f223918..219a3ac 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -1041,6 +1041,8 @@ void process_shaders() {
+     string_to_spv("fwht_shmem_f32", "fwht.comp", {{"FWHT_SHMEM", "1"}});
+     string_to_spv("fwht_f16", "fwht.comp", {{"FWHT_F16", "1"}});
+     string_to_spv("fwht_shmem_f16", "fwht.comp", {{"FWHT_F16", "1"}, {"FWHT_SHMEM", "1"}});
++    string_to_spv("fwht_row_f32", "fwht_row.comp", {});
++    string_to_spv("fwht_row_signed_f32", "fwht_row.comp", {{"FWHT_SIGNED", "1"}});
+     string_to_spv("count_equal_i32", "count_equal.comp", merge_maps(base_dict, {{"A_TYPE", "int"}, {"B_TYPE", "int"}, {"D_TYPE", "int"}}));
+     string_to_spv("cumsum_f32", "cumsum.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+     string_to_spv("cumsum_multipass1_f32", "cumsum_multipass1.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 497a932..a4964f7 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -10312,6 +10312,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+             }
+         }
+         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_PQ2_0, GGML_TYPE_F32, 248320, 1, 5120, {1, 1}, {1, 1}));
++        // FWHT at the decode shapes of Bonsai 2 27B (rows = width / 1024 per token), plain and with the sign flip
++        for (int64_t rows : {5, 6, 17}) {
++            test_cases.emplace_back(new test_mul_mat_hadamard(GGML_TYPE_F32, GGML_TYPE_F32, 1024, rows, 1024));
++        }
++        for (int64_t width : {5120, 6144, 17408}) {
++            test_cases.emplace_back(new test_fwht_signed(1024, width, 1));
++        }
++        test_cases.emplace_back(new test_fwht_signed(1024, 5120, 512));
+         // bandwidth probes: nearly compute-free streaming reads of the same size class
+         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F16, GGML_TYPE_F32, 17408, 1, 5120, {1, 1}, {1, 1}));
+         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F32, GGML_TYPE_F32, 17408, 1, 5120, {1, 1}, {1, 1}));
+-- 
+2.53.0
+

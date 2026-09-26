@@ -1,0 +1,356 @@
+From 00654b99d69f6cd26c7a8794b4fa6321c9c3756b Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 10:48:18 +0000
+Subject: [PATCH 18/24] vulkan: SWIGLU prologue in fwht_row (GLU_FWHT)
+
+{GLU swiglu(gate, up), MUL(signs), RESHAPE, MUL_MAT(H)} runs as one fwht_row dispatch that computes
+silu(gate) * up while loading: the FFN GLU dispatch and its intermediate disappear (-64 launches per Bonsai
+decode token). Works with the q8_1 epilogue. GGML_VK_DISABLE_GLU_FWHT turns it off. Test: GLU_FWHT.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp          | 84 +++++++++++++++++--
+ .../ggml-vulkan/vulkan-shaders/fwht_row.comp  | 14 ++++
+ .../vulkan-shaders/vulkan-shaders-gen.cpp     |  2 +
+ tests/test-backend-ops.cpp                    | 60 +++++++++++++
+ 4 files changed, 153 insertions(+), 7 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index b22b029..773a0de 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -1064,6 +1064,9 @@ struct vk_device_struct {
+     // the same, also writing the q8_1 copy (quantize_q8_1_x4_i4 layout) for a following PQ2_0 mat-vec
+     vk_pipeline pipeline_fwht_row_signed_q8_f32[GGML_VK_FWHT_NUM_SIZES];
+     vk_pipeline pipeline_fwht_norm_q8_f32[GGML_VK_FWHT_NUM_SIZES];
++    // signed fwht_row with a SWIGLU prologue (silu(gate) * up computed while loading)
++    vk_pipeline pipeline_fwht_row_glu_f32[GGML_VK_FWHT_NUM_SIZES];
++    vk_pipeline pipeline_fwht_row_glu_q8_f32[GGML_VK_FWHT_NUM_SIZES];
+     vk_pipeline pipeline_cumsum_f32;
+     vk_pipeline pipeline_cumsum_small_f32;
+     vk_pipeline pipeline_cumsum_multipass1_f32;
+@@ -1447,6 +1450,7 @@ struct vk_op_fwht_row_push_constants {
+     uint32_t sign_offset;
+     uint32_t rows_per_token;
+     float scale;
++    uint32_t src1_offset; // SWIGLU prologue: up rows
+ };
+ 
+ struct vk_op_count_experts_push_constants {
+@@ -2438,6 +2442,7 @@ struct ggml_backend_vk_context {
+     topk_moe_mode fused_topk_moe_mode {};
+     bool fused_topk_moe_scale {};
+     bool fused_mul_fwht {};
++    bool fused_glu_fwht {};
+     bool fused_norm_fwht {};
+     bool fused_norm_fwht_dual {};
+ 
+@@ -5890,6 +5895,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+                 n * sizeof(float) <= device->properties.limits.maxComputeSharedMemorySize) {
+                 ggml_vk_create_pipeline(device, device->pipeline_fwht_row_f32[idx], "fwht_row_f32", fwht_row_f32_len, fwht_row_f32_data, "main", 2, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
+                 ggml_vk_create_pipeline(device, device->pipeline_fwht_row_signed_f32[idx], "fwht_row_signed_f32", fwht_row_signed_f32_len, fwht_row_signed_f32_data, "main", 3, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
++                ggml_vk_create_pipeline(device, device->pipeline_fwht_row_glu_f32[idx], "fwht_row_glu_f32", fwht_row_glu_f32_len, fwht_row_glu_f32_data, "main", 4, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
+                 if (device->subgroup_arithmetic) {
+                     ggml_vk_create_pipeline(device, device->pipeline_fwht_norm_f32[idx], "fwht_norm_f32", fwht_norm_f32_len, fwht_norm_f32_data, "main", 5, sizeof(vk_op_fwht_norm_push_constants), {1, 1, 1}, { n }, 1);
+                 }
+@@ -5897,6 +5903,7 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+                 if (device->integer_dot_product && device->subgroup_clustered && device->subgroup_size >= 32 &&
+                     device->pipeline_quantize_q8_1_x4_i4 != nullptr) {
+                     ggml_vk_create_pipeline(device, device->pipeline_fwht_row_signed_q8_f32[idx], "fwht_row_signed_q8_f32", fwht_row_signed_q8_f32_len, fwht_row_signed_q8_f32_data, "main", 4, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
++                    ggml_vk_create_pipeline(device, device->pipeline_fwht_row_glu_q8_f32[idx], "fwht_row_glu_q8_f32", fwht_row_glu_q8_f32_len, fwht_row_glu_q8_f32_data, "main", 5, sizeof(vk_op_fwht_row_push_constants), {1, 1, 1}, { n }, 1);
+                     if (device->subgroup_arithmetic) {
+                         ggml_vk_create_pipeline(device, device->pipeline_fwht_norm_q8_f32[idx], "fwht_norm_q8_f32", fwht_norm_q8_f32_len, fwht_norm_q8_f32_data, "main", 6, sizeof(vk_op_fwht_norm_push_constants), {1, 1, 1}, { n }, 1);
+                     }
+@@ -10225,13 +10232,17 @@ static void ggml_vk_fwht_q8_mark(ggml_backend_vk_context * ctx, const ggml_tenso
+     ctx->prealloc_y_need_sync = true;
+ }
+ 
++// with `up`, src is the gate and the row is swiglu(src, up) (needs signs)
+ static void ggml_vk_fwht_row(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src, const ggml_tensor * signs,
+-                             int64_t n, ggml_tensor * dst, uint64_t q8_sz = 0) {
++                             int64_t n, ggml_tensor * dst, uint64_t q8_sz = 0, const ggml_tensor * up = nullptr) {
++    GGML_ASSERT(up == nullptr || signs != nullptr);
+     const int idx = ggml_vk_fwht_pipeline_idx(n);
+-    vk_pipeline pipeline = signs ? ctx->device->pipeline_fwht_row_signed_f32[idx] : ctx->device->pipeline_fwht_row_f32[idx];
++    vk_pipeline pipeline = up ? ctx->device->pipeline_fwht_row_glu_f32[idx] :
++                           signs ? ctx->device->pipeline_fwht_row_signed_f32[idx] : ctx->device->pipeline_fwht_row_f32[idx];
+     GGML_ASSERT(pipeline != nullptr);
+-    if (q8_sz != 0 && signs && ctx->device->pipeline_fwht_row_signed_q8_f32[idx] != nullptr) {
+-        pipeline = ctx->device->pipeline_fwht_row_signed_q8_f32[idx];
++    vk_pipeline q8_pipeline = up ? ctx->device->pipeline_fwht_row_glu_q8_f32[idx] : ctx->device->pipeline_fwht_row_signed_q8_f32[idx];
++    if (q8_sz != 0 && signs && q8_pipeline != nullptr) {
++        pipeline = q8_pipeline;
+         ggml_vk_fwht_q8_reserve(ctx, subctx, q8_sz);
+     } else {
+         q8_sz = 0;
+@@ -10253,17 +10264,29 @@ static void ggml_vk_fwht_row(ggml_backend_vk_context * ctx, vk_context& subctx,
+         1.0f / std::sqrt((float)n),
+     };
+ 
++    const vk_subbuffer up_buf = up ? ggml_vk_tensor_subbuffer(ctx, up, true) : src_buf;
++    if (up) {
++        pc.src1_offset = (uint32_t)(get_misalign_bytes(ctx, up) / ggml_type_size(up->type));
++    }
+     if (signs && q8_sz != 0) {
+         const vk_subbuffer sign_buf = ggml_vk_tensor_subbuffer(ctx, signs, true);
+         const vk_subbuffer q8_buf = { ctx->prealloc_y, 0, q8_sz };
+         if (ctx->prealloc_y_need_sync) {
+             ggml_vk_sync_buffers(ctx, subctx);
+         }
+-        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf, sign_buf, q8_buf }, pc, { workgroups_x, 1, 1 });
++        if (up) {
++            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf, sign_buf, q8_buf, up_buf }, pc, { workgroups_x, 1, 1 });
++        } else {
++            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf, sign_buf, q8_buf }, pc, { workgroups_x, 1, 1 });
++        }
+         ggml_vk_fwht_q8_mark(ctx, dst);
+     } else if (signs) {
+         const vk_subbuffer sign_buf = ggml_vk_tensor_subbuffer(ctx, signs, true);
+-        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf, sign_buf }, pc, { workgroups_x, 1, 1 });
++        if (up) {
++            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf, sign_buf, up_buf }, pc, { workgroups_x, 1, 1 });
++        } else {
++            ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf, sign_buf }, pc, { workgroups_x, 1, 1 });
++        }
+     } else {
+         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src_buf, dst_buf }, pc, { workgroups_x, 1, 1 });
+     }
+@@ -10414,6 +10437,28 @@ static bool ggml_vk_can_fuse_mul_fwht(const ggml_backend_vk_context * ctx, const
+     return n_rows <= ggml_vk_fwht_row_max();
+ }
+ 
++// {GLU swiglu(gate, up) split, then the MUL_FWHT chain on its output} -> one fwht_row_glu dispatch
++static bool ggml_vk_can_fuse_glu_fwht(const ggml_backend_vk_context * ctx, const struct ggml_cgraph * cgraph, int node_idx) {
++    static const bool disabled = getenv("GGML_VK_DISABLE_GLU_FWHT") != nullptr;
++    if (disabled || node_idx + 3 >= cgraph->n_nodes) {
++        return false;
++    }
++    const ggml_tensor * glu = cgraph->nodes[node_idx];
++    if (glu->op != GGML_OP_GLU || ggml_get_glu_op(glu) != GGML_GLU_OP_SWIGLU || glu->src[1] == nullptr ||
++        cgraph->nodes[node_idx + 1]->src[0] != glu || !ggml_vk_can_fuse_mul_fwht(ctx, cgraph, node_idx + 1)) {
++        return false;
++    }
++    if (ggml_node_get_use_count(cgraph, node_idx) != 1 || (glu->flags & GGML_TENSOR_FLAG_OUTPUT)) {
++        return false;
++    }
++    const ggml_tensor * g = glu->src[0];
++    const ggml_tensor * u = glu->src[1];
++    const int idx = ggml_vk_fwht_pipeline_idx(cgraph->nodes[node_idx + 3]->src[0]->ne[0]);
++    return g->type == GGML_TYPE_F32 && u->type == GGML_TYPE_F32 && glu->type == GGML_TYPE_F32 &&
++           ggml_is_contiguous(g) && ggml_is_contiguous(u) && ggml_are_same_shape(g, u) && ggml_are_same_shape(g, glu) &&
++           idx >= 0 && ctx->device->pipeline_fwht_row_glu_f32[idx] != nullptr;
++}
++
+ static void ggml_vk_fwht(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src, ggml_tensor * dst) {
+     const int idx = ggml_vk_fwht_pipeline_idx(src->ne[0]);
+     if (src->type == GGML_TYPE_F32 && ctx->device->pipeline_fwht_row_f32[idx] != nullptr &&
+@@ -16078,6 +16123,13 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+         }
+         break;
+     case GGML_OP_GLU:
++        if (ctx->fused_glu_fwht) {
++            const ggml_tensor * mul = cgraph->nodes[node_idx + 1];
++            ggml_tensor * mm = cgraph->nodes[node_idx + 3];
++            ggml_vk_fwht_row(ctx, compute_ctx, src0, mul->src[1], mm->src[0]->ne[0], mm,
++                             ggml_vk_fwht_q8_size(ctx, cgraph, node_idx + 3, mm), src1);
++            break;
++        }
+         switch (ggml_get_glu_op(node)) {
+         case GGML_GLU_OP_GEGLU:
+         case GGML_GLU_OP_REGLU:
+@@ -17680,6 +17732,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+         ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
+         ctx->fused_topk_moe_scale = false;
+         ctx->fused_mul_fwht = false;
++        ctx->fused_glu_fwht = false;
+         ctx->fused_norm_fwht = false;
+         ctx->fused_norm_fwht_dual = false;
+         const char *fusion_string {};
+@@ -17700,6 +17753,13 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 if (nf == 2) {
+                     ctx->fused_ops_write_mask |= 1 << 1;
+                 }
++            } else if (ggml_vk_can_fuse_glu_fwht(ctx, cgraph, i)) {
++                ctx->num_additional_fused_ops = 3;
++                ctx->fused_glu_fwht = true;
++                fusion_string = "GLU_FWHT";
++                // fwht_row loads both whole input rows before any store and one workgroup owns a row, so exact
++                // aliasing is safe; partial overlap is still rejected by the check below
++                std::fill_n(op_srcs_fused_elementwise, 4, true);
+             } else if (ggml_vk_can_fuse_mul_fwht(ctx, cgraph, i)) {
+                 ctx->num_additional_fused_ops = 2;
+                 ctx->fused_mul_fwht = true;
+@@ -17906,6 +17966,7 @@ static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cg
+                 ctx->fused_topk_moe_mode = TOPK_MOE_COUNT;
+                 ctx->fused_topk_moe_scale = false;
+                 ctx->fused_mul_fwht = false;
++                ctx->fused_glu_fwht = false;
+                 ctx->fused_norm_fwht = false;
+                 ctx->fused_norm_fwht_dual = false;
+             }
+@@ -18067,6 +18128,12 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+                    graph->nodes[start + 2]->src[0] == graph->nodes[start + 1] &&
+                    ggml_get_op_params_i32(graph->nodes[start + 4], 1) == GGML_HINT_SRC0_IS_HADAMARD;
+         };
++        static constexpr std::initializer_list<ggml_op> glu_fwht_pattern { GGML_OP_GLU, GGML_OP_MUL, GGML_OP_RESHAPE, GGML_OP_MUL_MAT };
++        auto const &is_glu_fwht = [&](int start) -> bool {
++            return match_pattern(glu_fwht_pattern, start) &&
++                   graph->nodes[start + 1]->src[0] == graph->nodes[start] &&
++                   ggml_get_op_params_i32(graph->nodes[start + 3], 1) == GGML_HINT_SRC0_IS_HADAMARD;
++        };
+         auto const &is_mul_fwht = [&](int start) -> bool {
+             return match_pattern(mul_fwht_pattern, start) &&
+                    ggml_get_op_params_i32(graph->nodes[start + 2], 1) == GGML_HINT_SRC0_IS_HADAMARD;
+@@ -18107,6 +18174,9 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+         if (is_norm_fwht(first_unused) && keep_pattern(norm_fwht_pattern)) {
+             continue;
+         }
++        if (is_glu_fwht(first_unused) && keep_pattern(glu_fwht_pattern)) {
++            continue;
++        }
+         if (is_mul_fwht(first_unused) && keep_pattern(mul_fwht_pattern)) {
+             continue;
+         }
+@@ -18135,7 +18205,7 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph *
+                 match_pattern(topk_moe_early_softmax, j) ||
+                 match_pattern(topk_moe_late_softmax, j) ||
+                 match_pattern(snake_pattern, j) ||
+-                is_mul_fwht(j) || is_norm_fwht(j)) {
++                is_mul_fwht(j) || is_norm_fwht(j) || is_glu_fwht(j)) {
+                 continue;
+             }
+             bool ok = true;
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/fwht_row.comp b/ggml/src/ggml-vulkan/vulkan-shaders/fwht_row.comp
+index af6feb8..72dd5ff 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/fwht_row.comp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/fwht_row.comp
+@@ -38,6 +38,7 @@ layout(push_constant) uniform parameter
+     uint sign_offset;
+     uint rows_per_token; // sign vector length / N
+     float scale;
++    uint src1_offset;    // FWHT_GLU: element offset of the up rows
+ };
+ 
+ layout(binding = 0, std430) readonly buffer A { float data_a[]; };
+@@ -50,6 +51,14 @@ layout(binding = 2, std430) readonly buffer S { float data_s[]; };
+ #define FWHT_Q8_BINDING 3
+ #include "fwht_q8.glsl"
+ #endif
++#ifdef FWHT_GLU
++// SWIGLU prologue (only with FWHT_SIGNED): the row is silu(gate) * up, gate in A and up in B
++#ifdef FWHT_Q8
++layout(binding = 4, std430) readonly buffer B { float data_b[]; };
++#else
++layout(binding = 3, std430) readonly buffer B { float data_b[]; };
++#endif
++#endif
+ 
+ shared float shmem[N];
+ 
+@@ -66,7 +75,12 @@ void main() {
+         float reg[EL];
+         [[unroll]] for (uint i = 0; i < EL; ++i) {
+             const uint e = tid + WG * i;
++#ifdef FWHT_GLU
++            const float g = data_a[src_offset + row_offset + e];
++            float v = g / (1.0f + exp(-g)) * data_b[src1_offset + row_offset + e] * scale;
++#else
+             float v = data_a[src_offset + row_offset + e] * scale;
++#endif
+ #ifdef FWHT_SIGNED
+             v *= data_s[sign_offset + sign_row + e];
+ #endif
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 7c10088..7f0341d 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -1048,6 +1048,8 @@ void process_shaders() {
+     string_to_spv("fwht_norm_f32", "fwht_norm.comp", {});
+     string_to_spv("fwht_row_signed_q8_f32", "fwht_row.comp", {{"FWHT_SIGNED", "1"}, {"FWHT_Q8", "1"}});
+     string_to_spv("fwht_norm_q8_f32", "fwht_norm.comp", {{"FWHT_Q8", "1"}});
++    string_to_spv("fwht_row_glu_f32", "fwht_row.comp", {{"FWHT_SIGNED", "1"}, {"FWHT_GLU", "1"}});
++    string_to_spv("fwht_row_glu_q8_f32", "fwht_row.comp", {{"FWHT_SIGNED", "1"}, {"FWHT_GLU", "1"}, {"FWHT_Q8", "1"}});
+     string_to_spv("count_equal_i32", "count_equal.comp", merge_maps(base_dict, {{"A_TYPE", "int"}, {"B_TYPE", "int"}, {"D_TYPE", "int"}}));
+     string_to_spv("cumsum_f32", "cumsum.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+     string_to_spv("cumsum_multipass1_f32", "cumsum_multipass1.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 8676ffa..3cde6c9 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -4851,6 +4851,60 @@ struct test_fwht_mmvq : public test_fwht_signed {
+     }
+ };
+ 
++// swiglu(gate, up) + sign flip + FWHT, the FFN down-projection input transform, optionally followed by the PQ2_0
++// mat-vec (the q8_1 epilogue)
++struct test_glu_fwht : public test_fwht_signed {
++    const bool mmvq;
++
++    test_glu_fwht(int64_t width = 17408, int64_t n_tokens = 1, bool mmvq = false)
++        : test_fwht_signed(1024, width, n_tokens, GGML_TYPE_F32), mmvq(mmvq) {}
++
++    std::string vars() override {
++        return VARS_TO_STR3(width, n_tokens, mmvq);
++    }
++
++    std::string op_desc(ggml_tensor * t) override {
++        GGML_UNUSED(t);
++        return "GLU_FWHT";
++    }
++
++    double max_nmse_err() override {
++        return mmvq ? 5e-4 : 1e-7;
++    }
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, blk, blk);
++        ggml_set_name(a, "a");
++        ggml_tensor * g = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, width, n_tokens);
++        ggml_set_name(g, "g");
++        ggml_tensor * u = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, width, n_tokens);
++        ggml_set_name(u, "u");
++        ggml_tensor * s = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, width);
++        ggml_set_name(s, "s");
++
++        ggml_tensor * cur = ggml_mul(ctx, ggml_swiglu_split(ctx, g, u), s);
++        cur = ggml_reshape_2d(ctx, cur, blk, width / blk * n_tokens);
++        ggml_tensor * out = ggml_mul_mat(ctx, a, cur);
++        ggml_mul_mat_set_hint(out, GGML_HINT_SRC0_IS_HADAMARD);
++        if (mmvq) {
++            ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_PQ2_0, width, 256);
++            ggml_set_name(w, "w");
++            out = ggml_mul_mat(ctx, w, ggml_reshape_2d(ctx, out, width, n_tokens));
++        }
++        ggml_set_name(out, "out");
++        return out;
++    }
++
++    void initialize_tensors(ggml_context * ctx) override {
++        test_fwht_signed::initialize_tensors(ctx);
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
++            if (t->type == GGML_TYPE_PQ2_0) {
++                init_tensor_uniform(t);
++            }
++        }
++    }
++};
++
+ static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats) {
+     std::random_device rd;
+     std::default_random_engine rng(rd());
+@@ -9368,6 +9422,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+             }
+         }
+     }
++    for (bool mmvq : {false, true}) {
++        for (int64_t nt : {1, 3}) {
++            test_cases.emplace_back(new test_glu_fwht(17408, nt, mmvq));
++            test_cases.emplace_back(new test_glu_fwht(6144, nt, mmvq));
++        }
++    }
+     test_cases.emplace_back(new test_fwht_signed(1024, 5120, 32));
+     test_cases.emplace_back(new test_fwht_signed(1024, 6144, 7, GGML_TYPE_F16));
+     test_cases.emplace_back(new test_fwht_signed(1024, 17408, 3));
+-- 
+2.53.0
+

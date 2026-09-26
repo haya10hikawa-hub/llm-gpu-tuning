@@ -1,0 +1,11 @@
+build,draft_source,draft_n_max,prompt,decode_tps,accepted,drafted
+opt (pre-optimization),none,0,new code,26.03,,
+opt (pre-optimization),none,0,rewrite,25.91,,
+opt (pre-optimization),mtp head,1,new code,33.42,121,134
+opt (pre-optimization),mtp head,1,rewrite,34.85,255,256
+opt (pre-optimization),mtp head,2,new code,35.42,154,200
+opt (pre-optimization),mtp head,2,rewrite,40.49,337,348
+opt (pre-optimization),mtp head,3,new code,38.71,173,243
+opt (pre-optimization),mtp head,3,rewrite,44.14,378,397
+opt (pre-optimization),mtp head + ngram-mod,2,new code,36.24,154,200
+opt (pre-optimization),mtp head + ngram-mod,2,rewrite,36.64,484,516

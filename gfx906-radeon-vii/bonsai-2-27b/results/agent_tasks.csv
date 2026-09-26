@@ -1,0 +1,16 @@
+model,thinking,turn_timeout_s,task,sec,score,status
+bonsai-2-27b PQ2_0,on,6000,T01,1046.4,19/19,pass
+bonsai-2-27b PQ2_0,on,6000,T02,886.5,18/18,pass
+bonsai-2-27b PQ2_0,on,6000,T03,1253.7,57/57,pass
+bonsai-2-27b PQ2_0,on,6000,T04,1431.6,17/17,pass
+bonsai-2-27b PQ2_0,on,6000,T05,5013.6,25/25,pass
+bonsai-2-27b PQ2_0,on,6000,T06,1796.8,27/27,pass
+bonsai-2-27b PQ2_0,on,6000,T07,431.0,0/2,fail
+bonsai-2-27b PQ2_0,on,6000,T08,1494.3,39/39,pass
+bonsai-2-27b PQ2_0,on,6000,T09,590.7,23/23,pass
+bonsai-2-27b PQ2_0,on,6000,T10,481.7,17/17,pass
+bonsai-2-27b PQ2_0,on,6000,T11,430.5,18/18,pass
+bonsai-2-27b PQ2_0,on,6000,T12,1198.2,13/13,pass
+bonsai-2-27b PQ2_0,off (enable_thinking=false),6000,M1,2558.4,A 23/23,pass
+mimo-9b Q4_K_M,off,6000,T08,1245.6,0/2,fail (rerun of a 2400 s timeout)
+mimo-9b Q4_K_M,on,6000,T05,1758.3,17/25,partial (rerun of a 2400 s timeout)

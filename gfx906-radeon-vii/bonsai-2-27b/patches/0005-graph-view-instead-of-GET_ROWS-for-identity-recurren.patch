@@ -1,0 +1,155 @@
+From 9328e8191df24a00a873af610d7e33dc3b8ebc5b Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Fri, 25 Sep 2026 04:02:58 +0000
+Subject: [PATCH 05/24] graph: view instead of GET_ROWS for identity
+ recurrent-state copy (single seq, no rollback)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/llama-graph.cpp            | 14 ++++++++++++--
+ src/llama-graph.h              |  6 +++++-
+ src/llama-memory-recurrent.cpp |  7 +++++++
+ src/llama-memory-recurrent.h   |  4 ++++
+ src/models/delta-net-base.cpp  |  2 +-
+ src/models/qwen35.cpp          |  2 +-
+ 6 files changed, 30 insertions(+), 5 deletions(-)
+
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 9ad7fa9..6ef6747 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -375,7 +375,8 @@ void llm_graph_input_cls::set_input(const llama_ubatch * ubatch) {
+ void llm_graph_input_rs::set_input_rs(const llama_memory_recurrent_context * mctx_cur, const llama_ubatch * ubatch) {
+     const int64_t n_rs = mctx_cur->get_n_rs();
+ 
+-    if (s_copy) {
++    // s_copy has no buffer when every build_rs call used a view of the cache row (identity copy)
++    if (s_copy && s_copy->buffer) {
+         GGML_ASSERT(ggml_backend_buffer_is_host(s_copy->buffer));
+         int32_t * data = (int32_t *) s_copy->data;
+ 
+@@ -416,6 +417,7 @@ bool llm_graph_input_rs::can_reuse_rs(const llama_memory_recurrent_context * mct
+ 
+     res &= head == mctx_cur->get_head();
+     res &= rs_z == mctx_cur->get_rs_z();
++    res &= s_ident == mctx_cur->s_copy_identity();
+ 
+     return res;
+ }
+@@ -3578,6 +3580,7 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
+ 
+     inp->head = mctx_cur->get_head();
+     inp->rs_z = mctx_cur->get_rs_z();
++    inp->s_ident = mctx_cur->s_copy_identity();
+ 
+     return inp;
+ }
+@@ -3595,9 +3598,16 @@ ggml_tensor * llm_graph_context::build_rs(
+         ggml_tensor * s,
+             int32_t   state_size,
+             int32_t   n_seqs,
+-        const llm_graph_get_rows_fn & get_state_rows) const {
++        const llm_graph_get_rows_fn & get_state_rows,
++               bool   allow_view) const {
+     const auto * kv_state = inp->mctx;
+ 
++    static const bool view_disabled = getenv("LLAMA_RS_VIEW_DISABLE") != nullptr;
++    if (allow_view && inp->s_ident && !view_disabled && n_seqs == 1) {
++        ggml_tensor * states = ggml_reshape_2d(ctx0, s, state_size, s->ne[1]);
++        return ggml_view_2d(ctx0, states, state_size, 1, states->nb[1], kv_state->get_head()*states->nb[1]);
++    }
++
+     return build_rs(s, inp->s_copy_main, inp->s_copy_extra, state_size, n_seqs,
+                     kv_state->get_n_rs(), kv_state->get_head(), kv_state->get_size(), kv_state->get_rs_z(),
+                     get_state_rows);
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 6c2db64..19e6cf9 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -351,6 +351,7 @@ public:
+     // used in view offsets, need to match for valid graph reuse
+     uint32_t head;
+     int32_t rs_z;
++    bool s_ident = false; // see llama_memory_recurrent_context::s_copy_identity()
+ };
+ 
+ class llm_graph_input_cross_embd : public llm_graph_input_i {
+@@ -1431,12 +1432,15 @@ struct llm_graph_context {
+ 
+     llm_graph_input_rs * build_rs_inp() const;
+ 
++    // allow_view: the caller only reads the returned rows and writes the updated state back to the cache
++    // row afterwards, so for an identity copy a view of the cache row can stand in for the GET_ROWS
+     ggml_tensor * build_rs(
+             llm_graph_input_rs * inp,
+             ggml_tensor * s,
+                 int32_t   state_size,
+                 int32_t   n_seqs,
+-            const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
++            const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows,
++                   bool   allow_view = false) const;
+ 
+     // like build_rs, but WITHOUT the main per-seq state gather: performs the
+     // rs_zero clear and the extra-states relocation, then returns the 2D
+diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
+index e299097..3163ed2 100644
+--- a/src/llama-memory-recurrent.cpp
++++ b/src/llama-memory-recurrent.cpp
+@@ -1251,6 +1251,13 @@ ggml_tensor * llama_memory_recurrent_context::get_s_l(int32_t il) const {
+     return mem->s_l[il];
+ }
+ 
++bool llama_memory_recurrent_context::s_copy_identity() const {
++    if (mem->n_rs_seq != 0 || get_n_rs() != 1 || get_rs_z() >= 0) {
++        return false;
++    }
++    return mem->cells[mem->head].src0 == (int32_t) mem->head;
++}
++
+ int32_t llama_memory_recurrent_context::s_copy(int i) const {
+     const uint32_t cell_idx = i + mem->head;
+     const int32_t  src0     = mem->cells[cell_idx].src0;
+diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
+index b13b7b7..0c29696 100644
+--- a/src/llama-memory-recurrent.h
++++ b/src/llama-memory-recurrent.h
+@@ -173,6 +173,10 @@ public:
+ 
+     int32_t s_copy(int i) const;
+ 
++    // true when the single state row of this ubatch is copied onto itself (no rollback, no reset),
++    // so the copy can be replaced by a view of the cache row. has no side effects, unlike s_copy()
++    bool s_copy_identity() const;
++
+ private:
+     const llama_memory_status status;
+ 
+diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
+index ae67400..fabc481 100644
+--- a/src/models/delta-net-base.cpp
++++ b/src/models/delta-net-base.cpp
+@@ -465,7 +465,7 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
+ 
+     const int64_t n_seqs = ubatch.n_seqs;
+ 
+-    ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
++    ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs, ggml_get_rows, cparams.n_rs_seq == 0);
+     cb(conv_states, "conv_states", il);
+ 
+     conv_states = ggml_reshape_3d(ctx0, conv_states, conv_kernel_size - 1, conv_channels, n_seqs);
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index 2f143d3..1c164f8 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -486,7 +486,7 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
+         state = build_rs_cache_view(inp, ssm_states_all, hparams.n_embd_s(), n_seqs);
+         cb(state, "state_cache_view", il);
+     } else {
+-        state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs);
++        state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs, ggml_get_rows, cparams.n_rs_seq == 0);
+         state = ggml_reshape_4d(ctx0, state, head_v_dim, head_v_dim, num_v_heads, n_seqs);
+         cb(state, "state_predelta", il);
+     }
+-- 
+2.53.0
+

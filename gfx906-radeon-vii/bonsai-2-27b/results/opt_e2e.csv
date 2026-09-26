@@ -1,0 +1,12 @@
+build,commit,env,kv,decode_4k_tps,decode_15k_tps,prefill_4k_tps,prefill_15k_tps,greedy128_vs_base,window
+base,91162d5,,q4_0,27.59,28.92,99.8,91.2,128/128,opt11
+opt7,3e12df1,,q4_0,37.1,38.0,232,199,diverged at near-tie token (MMQ q8_1),opt7
+opt8,46f4add,,q4_0,37.26,39.00,241.2,205.5,128/128,opt8/9
+opt9,8a3a94c,,q4_0,37.31,37.92,241.3,205.5,128/128,opt8/9
+opt10-a,c9457d5,,q4_0,40.49,41.41,241.7,205.8,128/128,opt8/9
+opt10,1196943,,q4_0,43.82,42.45,244.3,207.8,128/128,opt10b
+opt10,1196943,GGML_VK_RM_KQ_INT=2,q4_0,44.46,43.67,245.3,208.2,128/128,opt11
+opt11,da13a64,GGML_VK_RM_KQ_INT=2,q4_0,42.22,44.35,243.9,208.0,128/128,opt11
+opt11,da13a64,GGML_VK_RM_KQ_INT=4,q4_0,43.88,43.96,242.6,207.9,128/128,opt11
+opt11,da13a64,GGML_VK_RM_KQ_INT=2,f16,47.24,48.64,250.1,221.1,128/128,opt11
+opt11,da13a64,GGML_VK_RM_KQ_INT=4,f16,46.97,44.96,250.4,221.4,128/128,opt11
