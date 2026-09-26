@@ -9,3 +9,13 @@ opt (pre-optimization),mtp head,3,new code,38.71,173,243
 opt (pre-optimization),mtp head,3,rewrite,44.14,378,397
 opt (pre-optimization),mtp head + ngram-mod,2,new code,36.24,154,200
 opt (pre-optimization),mtp head + ngram-mod,2,rewrite,36.64,484,516
+opt11 RM_KQ_INT=2 KV f16,none,0,new code,53.11,,
+opt11 RM_KQ_INT=2 KV f16,none,0,rewrite,51.72,,
+opt11 RM_KQ_INT=2 KV f16,mtp head,2,new code,63.37,159,191
+opt11 RM_KQ_INT=2 KV f16,mtp head,2,rewrite,72.93,337,348
+opt11 RM_KQ_INT=2 KV f16,mtp head,3,new code,61.25,172,247
+opt11 RM_KQ_INT=2 KV f16,mtp head,3,rewrite,75.06,379,395
+opt11 RM_KQ_INT=2 KV f16,mtp head,4,new code,59.54,185,277
+opt11 RM_KQ_INT=2 KV f16,mtp head,4,rewrite,76.77,402,436
+opt11 RM_KQ_INT=2 KV f16,mtp head,5,new code,55.23,191,316
+opt11 RM_KQ_INT=2 KV f16,mtp head,5,rewrite,73.54,417,470
