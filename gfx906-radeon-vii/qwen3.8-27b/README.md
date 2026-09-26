@@ -63,6 +63,11 @@ OpenAI 互換 API として常駐させる手順は [docs/serving.md](docs/servi
 | [docs/benchmarks.md](docs/benchmarks.md) | 品質・下流タスク・エージェント評価 |
 | [docs/predictions.md](docs/predictions.md) | 予測と結果の答え合わせ |
 | [docs/serving.md](docs/serving.md) | OpenAI 互換 API として常駐させる |
+| [docs/session-2026-09-25.md](docs/session-2026-09-25.md) | 進行中: decode のカーネル別内訳、GPU 未検証の試作4件 |
 
 未解決は 1 件 — `q8_0 m=48 k=5120` の matvec が実効 16 GB/s (matvec 時間の 5.1%)。
 m=48 では 60 CU を埋められず、split-K が要る。期待 +3〜4%。
+
+施策4 (HOST_VISIBLE_VIDMEM) の効果量について、2026-09-25 のセッションで
+本欄より大きい倍率 (2.3〜2.5倍) が測定された。対照なしの単発差のため未確定 —
+詳細は [docs/session-2026-09-25.md](docs/session-2026-09-25.md)。
