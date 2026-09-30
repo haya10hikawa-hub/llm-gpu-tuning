@@ -1,7 +1,7 @@
 From d835127c1bd5165952d4e4f149d3272026a3bf66 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Sat, 26 Sep 2026 06:36:27 +0000
-Subject: [PATCH 27/34] vulkan: fwht_norm issues the sum-of-squares loads 8 at
+Subject: [PATCH 27/36] vulkan: fwht_norm issues the sum-of-squares loads 8 at
  a time (latency-bound row walk)
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

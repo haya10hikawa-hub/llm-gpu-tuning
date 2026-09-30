@@ -1,7 +1,7 @@
 From bd9f8cf0cc1ab0ec731406a5bf8ee12da3f2eba8 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Sat, 26 Sep 2026 13:32:08 +0000
-Subject: [PATCH 34/34] vulkan: large workgroup for small-m float mat-vecs (GDN
+Subject: [PATCH 34/36] vulkan: large workgroup for small-m float mat-vecs (GDN
  alpha/beta, bf16 48 x 5120); tests: bf16 m=48/96 perf
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

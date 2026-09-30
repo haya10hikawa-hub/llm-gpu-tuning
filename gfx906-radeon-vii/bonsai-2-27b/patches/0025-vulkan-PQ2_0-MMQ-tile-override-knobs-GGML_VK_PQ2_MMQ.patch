@@ -1,7 +1,7 @@
 From 9029b9a40e283a1331cb490c830e04b91752d416 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Sat, 26 Sep 2026 06:16:16 +0000
-Subject: [PATCH 25/34] vulkan: PQ2_0 MMQ tile override knobs
+Subject: [PATCH 25/36] vulkan: PQ2_0 MMQ tile override knobs
  (GGML_VK_PQ2_MMQ_L/_M/_S, _TILE); tests: Bonsai prefill MMQ perf shapes
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

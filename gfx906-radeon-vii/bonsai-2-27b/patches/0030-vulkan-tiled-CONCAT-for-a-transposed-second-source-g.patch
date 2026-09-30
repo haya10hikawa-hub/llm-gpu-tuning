@@ -1,7 +1,7 @@
 From e5fb7cbaca4720d352f615709c561b0ca8ecd4eb Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Sat, 26 Sep 2026 10:01:58 +0000
-Subject: [PATCH 30/34] vulkan: tiled CONCAT for a transposed second source
+Subject: [PATCH 30/36] vulkan: tiled CONCAT for a transposed second source
  (gated-delta-net conv input at prefill)
 
 The generic concat read qkv^T 40 KB apart per output element: 1.86 ms per GDN layer at ub 1024 (~22 GB/s,

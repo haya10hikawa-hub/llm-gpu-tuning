@@ -1,7 +1,7 @@
 From a30fd6538d82cdf3950a755a12fc96a18a56c9a4 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Sat, 26 Sep 2026 06:49:37 +0000
-Subject: [PATCH 28/34] vulkan: GGML_VK_CPU_TIMING per-graph record/wait/gap
+Subject: [PATCH 28/36] vulkan: GGML_VK_CPU_TIMING per-graph record/wait/gap
  timing; sampling: top-k prefilter over raw logits when only penalties precede
  top_k
 

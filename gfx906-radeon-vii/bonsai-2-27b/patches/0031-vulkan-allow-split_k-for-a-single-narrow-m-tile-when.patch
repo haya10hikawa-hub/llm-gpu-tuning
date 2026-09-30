@@ -1,7 +1,7 @@
 From 332ee2415ef1383544484a28b719e34e63a27014 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Sat, 26 Sep 2026 10:12:08 +0000
-Subject: [PATCH 31/34] vulkan: allow split_k for a single narrow m-tile when
+Subject: [PATCH 31/36] vulkan: allow split_k for a single narrow m-tile when
  there are several n-tiles (GDN alpha/beta at prefill)
 
 m=48 was excluded by m >= BM, leaving 16 workgroups for the whole GPU. Prefill +1-1.5%. GGML_VK_NO_NARROW_M_SPLIT_K restores the old rule.

@@ -1,7 +1,7 @@
 From 8fbe43ac968de4f242af745c614d29c82322e5ce Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Sat, 26 Sep 2026 11:37:56 +0000
-Subject: [PATCH 32/34] vulkan: PQ2_0 MMVQ takes 32 weights (one q8_1 block)
+Subject: [PATCH 32/36] vulkan: PQ2_0 MMVQ takes 32 weights (one q8_1 block)
  per thread and step
 
 Removing the weight loads left 24.6 of 40.5 us (5120x17408): the path is VALU-bound. 32 weights per step run the

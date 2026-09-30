@@ -1,7 +1,7 @@
 From 584edf2e94d10ae9d1aa42152c84974c0f512fd6 Mon Sep 17 00:00:00 2001
 From: bench <bench@local>
 Date: Sat, 26 Sep 2026 13:06:32 +0000
-Subject: [PATCH 33/34] vulkan: FA decode tile for GQA 4..8, head >= 256 on
+Subject: [PATCH 33/36] vulkan: FA decode tile for GQA 4..8, head >= 256 on
  GCN; tuning knobs; GQA-6 decode FA tests
 
 The 8-row tile split 4 ways left one subgroup on padding rows (GQA 6) and every subgroup re-read K/V. Now the tile
