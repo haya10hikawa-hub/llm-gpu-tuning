@@ -1,0 +1,3 @@
+run,minutes,server_args,requests,errors,crash,determinism_probes,rss_mib_range,decode_tps_first_half,decode_tps_second_half,verdict
+soak1,60,opt14 + MTP n2 + KV f16 + ub1024 (no --cache-ram),160,0,no,6/6 identical,604-8967 (prompt cache up to ~8 GB then evicted; no trend),56.8,55.0,fail (RSS above limit)
+soak2,20,same + --cache-ram 2048,37,0,no,2/2 identical,1799-3241 (bounded),59.4,53.5,pass

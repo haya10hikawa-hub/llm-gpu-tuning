@@ -39,6 +39,22 @@ GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 GGML_VK_RM_KQ_INT=2 \
 - tool calling を使うなら [patches/toolcall-optional-newlines.patch](../patches/toolcall-optional-newlines.patch) も当てる
 - 思考を切るなら `--chat-template-kwargs '{"enable_thinking":false}'`。`--reasoning-budget 0` だけでは止まらない
 
+## 本番運用 (2026-10-01〜)
+
+連続運転試験 ([results/soak.csv](results/soak.csv)) に合格し、OpenAI 互換 API として常駐させた。
+
+```bash
+GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 GGML_VK_RM_KQ_INT=2 \
+  llama-server -m models/Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf -ngl 99 -c 65536 --parallel 1 \
+    -ctk f16 -ctv f16 -ub 1024 -b 2048 \
+    --spec-type draft-mtp --spec-draft-n-max 2 -ctkd f16 -ctvd f16 \
+    --cache-ram 5120 --jinja --metrics
+```
+
+- **`--cache-ram` は必須。** 既定ではプロンプトキャッシュでサーバーの RSS が 9 GB まで膨らむ (ホスト RAM 15 GB)。
+  2 GB 上限で 1.8〜3.2 GB に頭打ち。運用では 5 GB に設定。
+- 60 分 + 20 分の試験でエラー 0、クラッシュなし、決定性プローブはすべて一致、速度低下なし。
+
 ## 理論上限までの距離 (decode)
 
 1 トークンで読む量 (重み 6.85 GB ほか) を実測の読み出し上限 830 GB/s で割ると約 9 ms。
