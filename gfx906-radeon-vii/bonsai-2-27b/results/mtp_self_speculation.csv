@@ -1,0 +1,37 @@
+build,draft_source,draft_n_max,prompt,decode_tps,accepted,drafted
+opt (pre-optimization),none,0,new code,26.03,,
+opt (pre-optimization),none,0,rewrite,25.91,,
+opt (pre-optimization),mtp head,1,new code,33.42,121,134
+opt (pre-optimization),mtp head,1,rewrite,34.85,255,256
+opt (pre-optimization),mtp head,2,new code,35.42,154,200
+opt (pre-optimization),mtp head,2,rewrite,40.49,337,348
+opt (pre-optimization),mtp head,3,new code,38.71,173,243
+opt (pre-optimization),mtp head,3,rewrite,44.14,378,397
+opt (pre-optimization),mtp head + ngram-mod,2,new code,36.24,154,200
+opt (pre-optimization),mtp head + ngram-mod,2,rewrite,36.64,484,516
+opt11 RM_KQ_INT=2 KV f16,none,0,new code,53.11,,
+opt11 RM_KQ_INT=2 KV f16,none,0,rewrite,51.72,,
+opt11 RM_KQ_INT=2 KV f16,mtp head,2,new code,63.37,159,191
+opt11 RM_KQ_INT=2 KV f16,mtp head,2,rewrite,72.93,337,348
+opt11 RM_KQ_INT=2 KV f16,mtp head,3,new code,61.25,172,247
+opt11 RM_KQ_INT=2 KV f16,mtp head,3,rewrite,75.06,379,395
+opt11 RM_KQ_INT=2 KV f16,mtp head,4,new code,59.54,185,277
+opt11 RM_KQ_INT=2 KV f16,mtp head,4,rewrite,76.77,402,436
+opt11 RM_KQ_INT=2 KV f16,mtp head,5,new code,55.23,191,316
+opt11 RM_KQ_INT=2 KV f16,mtp head,5,rewrite,73.54,417,470
+opt13 RM_KQ_INT=2 KV f16 ub1024,none,0,new code ctx 2190,57.34,,
+opt13 RM_KQ_INT=2 KV f16 ub1024,none,0,new code ctx 4343,54.45,,
+opt13 RM_KQ_INT=2 KV f16 ub1024,none,0,new code ctx 15108,49.25,,
+opt13 RM_KQ_INT=2 KV f16 ub1024,none,0,rewrite ctx 2646,55.82,,
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,1,new code ctx 2190,63.28,117,138
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,1,new code ctx 4343,59.17,117,138
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,1,new code ctx 15108,53.72,117,137
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,1,rewrite ctx 2646,66.19,255,256
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,2,new code ctx 2190,71.31,159,191
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,2,new code ctx 4343,63.66,153,203
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,2,new code ctx 15108,55.96,153,204
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,2,rewrite ctx 2646,77.11,337,348
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,3,new code ctx 2190,65.04,173,244
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,3,new code ctx 4343,60.25,171,251
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,3,new code ctx 15108,52.16,169,258
+opt13 RM_KQ_INT=2 KV f16 ub1024,mtp head,3,rewrite ctx 2646,80.96,379,395

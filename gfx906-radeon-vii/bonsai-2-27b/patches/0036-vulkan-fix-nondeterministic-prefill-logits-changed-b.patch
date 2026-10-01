@@ -1,0 +1,251 @@
+From a89b24fea624bb9742a1fa1d8ab88fe9bd45882f Mon Sep 17 00:00:00 2001
+From: bench <bench@local>
+Date: Sat, 26 Sep 2026 17:42:19 +0000
+Subject: [PATCH 36/36] vulkan: fix nondeterministic prefill (logits changed
+ between server starts at ub 1024)
+
+- GDN_TAIL only for decode / speculative-verify sized batches (<= 8 tokens). At ub 1024 the fused tail made the
+  prefill logits depend on the server start (greedy output diverged at token 9 in ~3 of 8 starts), although the
+  kernel matches the CPU on its own at 1..1024 tokens; with it limited the output is identical across starts.
+- RMS_NORM taken over by NORM_FWHT / GDN_TAIL: do the add+rms partials bookkeeping ggml_vk_rms_norm does.
+- fused dispatches found by walking the graph: sync for their extra reads / writes (ggml_vk_sync_extra), require
+  the gate z of GDN_TAIL to be produced earlier, and only write later nodes outputs early when no node in
+  between uses that memory (ggml_vk_early_write_safe).
+- debugging aids: GGML_VK_SYNC_ALL, GGML_VK_SYNC_OPS=<op,...>. Tests: GDN_TAIL at 64/142/1024 tokens.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 134 +++++++++++++++++++++++++++
+ tests/test-backend-ops.cpp           |   3 +
+ 2 files changed, 137 insertions(+)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index a80fd92..862c55f 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -10620,6 +10620,43 @@ static bool ggml_vk_can_fuse_glu_fwht(const ggml_backend_vk_context * ctx, const
+ 
+ static bool ggml_vk_has_later_work(const struct ggml_cgraph * cgraph, int node_idx);
+ 
++// memory ranges of two tensors (same device buffer) overlap
++static bool ggml_vk_tensors_share_memory(const ggml_tensor * a, const ggml_tensor * b) {
++    if (a == nullptr || b == nullptr || a->buffer == nullptr || b->buffer == nullptr || a->buffer != b->buffer) {
++        return false;
++    }
++    const ggml_tensor * ab = a->view_src ? a->view_src : a;
++    const ggml_tensor * bb = b->view_src ? b->view_src : b;
++    const uintptr_t a0 = (uintptr_t)ab->data + (a->view_src ? a->view_offs : 0), a1 = a0 + ggml_nbytes(a);
++    const uintptr_t b0 = (uintptr_t)bb->data + (b->view_src ? b->view_offs : 0), b1 = b0 + ggml_nbytes(b);
++    return a0 < b1 && b0 < a1;
++}
++
++// Writing `out` at node `from` instead of at its own node `to` is safe only if no other node in between reads or
++// writes memory `out` shares (the allocator may have given it memory of a tensor that is live until then).
++static bool ggml_vk_early_write_safe(const struct ggml_cgraph * cgraph, int from, int to, const ggml_tensor * out,
++                                     std::initializer_list<const ggml_tensor *> fused) {
++    for (int j = from + 1; j < to && j < cgraph->n_nodes; j++) {
++        const ggml_tensor * n = cgraph->nodes[j];
++        bool is_fused = false;
++        for (const ggml_tensor * f : fused) {
++            is_fused = is_fused || f == n;
++        }
++        if (is_fused || ggml_is_empty(n) || ggml_op_is_empty(n->op)) {
++            continue;
++        }
++        if (ggml_vk_tensors_share_memory(n, out)) {
++            return false;
++        }
++        for (int k = 0; k < GGML_MAX_SRC; k++) {
++            if (n->src[k] != nullptr && ggml_vk_tensors_share_memory(n->src[k], out)) {
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
+ struct vk_gdn_tail {
+     const ggml_tensor * mw, * glu, * cont, * ms;
+     ggml_tensor * mm;
+@@ -10650,6 +10687,11 @@ static bool ggml_vk_can_gdn_tail(const ggml_backend_vk_context * ctx, const stru
+         return false;
+     }
+     const ggml_tensor * x = rn->src[0];
++    // decode / speculative-verify sized batches only: at prefill (ub 1024) the fused tail made the logits depend on
++    // the server start although the kernel matches the CPU on its own; the win is in decode anyway
++    if (ggml_nrows(x) > 8 * 48) {
++        return false;
++    }
+     if (x->type != GGML_TYPE_F32 || rn->type != GGML_TYPE_F32 || !ggml_is_contiguous(x) || x->ne[0] != 128 ||
+         ggml_node_get_use_count(cgraph, node_idx) != 1) {
+         return false;
+@@ -10674,6 +10716,16 @@ static bool ggml_vk_can_gdn_tail(const ggml_backend_vk_context * ctx, const stru
+         !ggml_is_contiguous(z) || !ggml_are_same_shape(z, x) || ggml_node_get_use_count(cgraph, i_glu) != 1) {
+         return false;
+     }
++    // the fused dispatch runs at the RMS_NORM, but also reads z: graph_optimize may have ordered the RMS_NORM before
++    // the node that produces z (z is not one of its sources), and z would then be read before it is written
++    {
++        const ggml_tensor * zp = z->view_src ? z->view_src : z;
++        for (int j = node_idx + 1; j < cgraph->n_nodes; j++) {
++            if (cgraph->nodes[j] == zp || cgraph->nodes[j] == z) {
++                return false;
++            }
++        }
++    }
+     const int i_cont = ggml_vk_find_consumer(cgraph, i_glu, glu, GGML_OP_CONT, 0);
+     if (i_cont < 0) {
+         return false;
+@@ -10712,16 +10764,80 @@ static bool ggml_vk_can_gdn_tail(const ggml_backend_vk_context * ctx, const stru
+         !ggml_vk_has_later_work(cgraph, i_mm)) {
+         return false;
+     }
++    if (!ggml_vk_early_write_safe(cgraph, node_idx, i_mm, mm, { mw, glu, cont, ms, mm })) {
++        return false;
++    }
+     t = { mw, glu, cont, ms, mm, i_mm };
+     return true;
+ }
+ 
++// A fused dispatch found by walking the graph (not a run of adjacent nodes) can read tensors the build_graph
++// dependency check never saw: sync if any of them overlaps a write that has not been synced yet.
++static uint32_t ggml_vk_rms_partials_size(ggml_backend_vk_context * ctx, const ggml_tensor * node);
++
++// an RMS_NORM taken over by a fused kernel does not read the partial sums of the ADD before it, but must still
++// advance the partials offset and clear the flags, as ggml_vk_rms_norm does (see rms_partials_fix.py)
++static void ggml_vk_consume_add_rms_partials(ggml_backend_vk_context * ctx, const ggml_tensor * src0) {
++    if (ctx->do_add_rms_partials_offset_calculation) {
++        ctx->prealloc_size_add_rms_partials_offset += ggml_vk_rms_partials_size(ctx, src0);
++        ctx->do_add_rms_partials = false;
++        ctx->do_add_rms_partials_offset_calculation = false;
++    }
++}
++
++static void ggml_vk_sync_extra(ggml_backend_vk_context * ctx, vk_context& subctx, std::initializer_list<const ggml_tensor *> reads,
++                               std::initializer_list<const ggml_tensor *> writes = {}) {
++    // writes must also wait for earlier readers and writers of the same memory
++    for (const ggml_tensor * t : writes) {
++        if (t == nullptr || t->buffer == nullptr) {
++            continue;
++        }
++        const vk_buffer tb = ((ggml_backend_vk_buffer_context *)t->buffer->context)->dev_buffer;
++        const uint64_t tb0 = vk_tensor_offset(t) + t->view_offs, tb1 = tb0 + ggml_nbytes(t);
++        for (const auto * list : { &ctx->unsynced_nodes_read, &ctx->unsynced_nodes_written }) {
++            for (const ggml_tensor * o : *list) {
++                if (o->buffer == nullptr || ((ggml_backend_vk_buffer_context *)o->buffer->context)->dev_buffer != tb) {
++                    continue;
++                }
++                const uint64_t ob0 = vk_tensor_offset(o) + o->view_offs, ob1 = ob0 + ggml_nbytes(o);
++                if (ob0 < tb1 && tb0 < ob1) {
++                    ctx->unsynced_nodes_written.clear();
++                    ctx->unsynced_nodes_read.clear();
++                    ggml_vk_sync_buffers(ctx, subctx);
++                    return;
++                }
++            }
++        }
++    }
++    for (const ggml_tensor * t : reads) {
++        if (t == nullptr || t->buffer == nullptr) {
++            continue;
++        }
++        const vk_buffer tb = ((ggml_backend_vk_buffer_context *)t->buffer->context)->dev_buffer;
++        const uint64_t tb0 = vk_tensor_offset(t) + t->view_offs, tb1 = tb0 + ggml_nbytes(t);
++        for (const ggml_tensor * o : ctx->unsynced_nodes_written) {
++            if (o->buffer == nullptr || ((ggml_backend_vk_buffer_context *)o->buffer->context)->dev_buffer != tb) {
++                continue;
++            }
++            const uint64_t ob0 = vk_tensor_offset(o) + o->view_offs, ob1 = ob0 + ggml_nbytes(o);
++            if (ob0 < tb1 && tb0 < ob1) {
++                ctx->unsynced_nodes_written.clear();
++                ctx->unsynced_nodes_read.clear();
++                ggml_vk_sync_buffers(ctx, subctx);
++                return;
++            }
++        }
++    }
++}
++
+ static void ggml_vk_gdn_tail(ggml_backend_vk_context * ctx, vk_context& subctx, const struct ggml_cgraph * cgraph, int node_idx,
+                              const vk_gdn_tail & t) {
+     const ggml_tensor * rn = cgraph->nodes[node_idx];
+     const ggml_tensor * x = rn->src[0];
+     const ggml_tensor * z = t.glu->src[0];
+     const ggml_tensor * w = t.mw->src[1];
++    // z (the gate) is not a source of the RMS_NORM this dispatch is issued at
++    ggml_vk_sync_extra(ctx, subctx, { z, x }, { t.mm });
+     const ggml_tensor * signs = t.ms->src[1];
+     const ggml_tensor * p = t.cont->src[0];
+     const int64_t n = t.mm->src[0]->ne[0];
+@@ -13768,6 +13884,9 @@ static const ggml_tensor * ggml_vk_conv_step_l2(const struct ggml_cgraph * cgrap
+             !ggml_is_contiguous(n) || v->ne[1] * 128 > silu->ne[0] || !ggml_vk_has_later_work(cgraph, j)) {
+             return nullptr;
+         }
++        if (!ggml_vk_early_write_safe(cgraph, node_idx, j, n, { n })) {
++            return nullptr;
++        }
+         return n;
+     }
+     return nullptr;
+@@ -13821,6 +13940,10 @@ static bool ggml_vk_can_conv_step(const ggml_backend_vk_context * ctx, const str
+         }
+         if (*conv && *cpy) {
+             const int last = std::max(ggml_vk_node_index(cgraph, *silu, node_idx), ggml_vk_node_index(cgraph, *cpy, node_idx));
++            // the SILU output is written at the CONCAT (the L2_NORM output is checked in ggml_vk_conv_step_l2)
++            if (!ggml_vk_early_write_safe(cgraph, node_idx, ggml_vk_node_index(cgraph, *silu, node_idx), *silu, { *conv, *silu, *cpy })) {
++                return false;
++            }
+             return ggml_vk_has_later_work(cgraph, last);
+         }
+     }
+@@ -13836,6 +13959,8 @@ static void ggml_vk_conv_step(ggml_backend_vk_context * ctx, vk_context& subctx,
+     vk_pipeline pipeline = ctx->device->pipeline_conv_step_f32;
+     ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
+ 
++    // outputs other than the CONCAT node: wait for earlier users of their memory
++    ggml_vk_sync_extra(ctx, subctx, {}, { silu, l2 });
+     const uint32_t C = (uint32_t)st->ne[1];
+     const vk_op_conv_step_push_constants pc = {
+         C,
+@@ -16424,6 +16549,13 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+             }
+         }
+ 
++        static const bool sync_all = getenv("GGML_VK_SYNC_ALL") != nullptr;
++        static const char * sync_ops = getenv("GGML_VK_SYNC_OPS");   // comma list of op names, debugging aid
++        need_sync = need_sync || sync_all;
++        if (!need_sync && sync_ops != nullptr) {
++            const std::string list = std::string(",") + sync_ops + ",";
++            need_sync = list.find(std::string(",") + ggml_op_name(node->op) + ",") != std::string::npos;
++        }
+         if (need_sync) {
+             if (vk_enable_sync_logger) {
+                 std::cerr <<  "sync" << std::endl;
+@@ -16624,8 +16756,10 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
+     case GGML_OP_RMS_NORM:
+         if (vk_gdn_tail gt; ctx->num_additional_fused_ops <= 1 && !ctx->fused_norm_fwht && ggml_vk_can_gdn_tail(ctx, cgraph, node_idx, gt)) {
+             ggml_vk_gdn_tail(ctx, compute_ctx, cgraph, node_idx, gt);
++            ggml_vk_consume_add_rms_partials(ctx, node->src[0]);
+         } else if (ctx->fused_norm_fwht) {
+             ggml_vk_norm_fwht(ctx, compute_ctx, cgraph, node_idx, ctx->fused_norm_fwht_dual);
++            ggml_vk_consume_add_rms_partials(ctx, node->src[0]);
+         } else {
+             ggml_vk_rms_norm(ctx, compute_ctx, cgraph, node_idx, (float *)node->op_params);
+         }
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 9bbf934..fbde29e 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -9632,6 +9632,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+             test_cases.emplace_back(new test_gdn_tail(nt, mmvq));
+         }
+     }
++    for (int64_t nt : {64, 142, 1024}) {   // prefill ubatches
++        test_cases.emplace_back(new test_gdn_tail(nt, false));
++    }
+     for (auto [T, C] : std::initializer_list<std::pair<int64_t, int64_t>>{{1024, 10240}, {37, 100}, {256, 33}}) {
+         test_cases.emplace_back(new test_concat_t(3, T, C));
+     }
+-- 
+2.53.0
+

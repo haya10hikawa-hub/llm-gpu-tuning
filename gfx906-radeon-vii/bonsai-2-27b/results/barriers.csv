@@ -1,0 +1,3 @@
+build,dispatch_groups_per_token,dependency_barriers_per_token,gpu_ms_per_token,launches_per_token
+opt10 before conv L2 and GDN tail,2056,948,19.55,1206
+opt10 after conv L2 and GDN tail,1816,756,18.83,1014

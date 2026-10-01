@@ -1,0 +1,11 @@
+run,binary,harness,ctx,kv,thinking,hvv,milestone,rc,sec,tests,output_tokens_max,status
+unpatched-grammar,llama.cpp-bonsai@842b188,pi-0.73.1,65536,q4_0,off,unset,M1,,,,16000,runaway to output limit
+toolfix,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off,1,M1,0,1491.7,A 23/23,,pass
+toolfix,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off,1,M2,0,2858.6,A 23/23 B 28/28,,pass
+toolfix,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off,1,M3,,,,,running
+thinking-off-nt,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off (enable_thinking=false),1,M1,0,2558.4,A 23/23,,pass
+thinking-off-nt,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off (enable_thinking=false),1,M2,0,1117.5,A 23/23 B 28/28,,pass
+thinking-off-nt,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off (enable_thinking=false),1,M3,,,,,invalid (server OOM-killed: /tmp tmpfs full)
+thinking-off-nt2,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off (enable_thinking=false),1,M1,0,948.5,A 23/23,,pass
+thinking-off-nt2,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off (enable_thinking=false),1,M2,0,1392.4,A 23/23 B 28/28,,pass
+thinking-off-nt2,llama.cpp-bonsai-toolfix@842b188,pi-0.73.1,65536,q4_0,off (enable_thinking=false),1,M3,0,5009.3,A 23/23 B 28/28 C 7/19,,partial

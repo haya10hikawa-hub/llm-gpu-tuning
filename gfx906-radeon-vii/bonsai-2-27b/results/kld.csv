@@ -1,0 +1,6 @@
+build,path,reference,mean_kld,max_kld,same_top_p_pct,ppl_ratio
+opt8,decode (-b 1 -ub 1),base,0.000890,0.0247,99.31,1.00067
+opt9,decode (-b 1 -ub 1),base,0.001230,0.0394,98.92,0.99928
+opt10,decode (-b 1 -ub 1),base,0.000972,0.0544,98.92,1.00050
+opt11 RM_KQ_INT=2,decode (-b 1 -ub 1),base,0.000972,0.0544,98.92,1.00050
+opt10,prefill (-b 512 -ub 256),base,0.003756,0.1022,97.35,0.99674

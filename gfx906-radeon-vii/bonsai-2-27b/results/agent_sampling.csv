@@ -1,0 +1,5 @@
+build,sampling,decode_tps,ms_per_tok,server_main_thread_cpu_ms_per_tok,note
+opt9,greedy,43.04,23.14,14.41,KV f16; 256 tokens after cached 4.3k prompt
+opt9,temp 0.7 top_p 0.8 top_k 20 presence 1.5,34.73,28.68,18.40,
+opt10,greedy,48.59,20.50,11.09,
+opt10,temp 0.7 top_p 0.8 top_k 20 presence 1.5,48.35,20.60,11.48,penalties fast path (patch 0019)

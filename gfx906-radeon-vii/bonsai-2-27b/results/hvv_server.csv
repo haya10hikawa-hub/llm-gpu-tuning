@@ -1,0 +1,3 @@
+condition,binary,ctx,kv_k,kv_v,parallel,fa,prompt_n,prefill_ms,prefill_ts,gen_n,decode_ms,decode_ts,cache_prompt,greedy_output_match
+default,llama.cpp-bonsai-toolfix@842b188,8192,q4_0,q4_0,1,on,4331,72696.58,59.58,200,22767.93,8.74,false,
+hvv_disabled,llama.cpp-bonsai-toolfix@842b188,8192,q4_0,q4_0,1,on,4331,41193.89,105.14,200,6341.52,31.38,false,714/714 chars

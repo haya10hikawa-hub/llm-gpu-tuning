@@ -1,0 +1,15 @@
+variant,ctx,extra_args,sampling,prompt_n,prefill_ts,gen_n,decode_ts,hvv
+A default,65536,,greedy,4383,59.4,300,8.72,unset
+B fa on,65536,-fa on,greedy,4383,59.3,300,8.73,unset
+C no checkpoints,65536,-ctxcp 0,greedy,4383,59.9,300,8.67,unset
+D no cache ram,65536,-cram 0,greedy,4383,59.4,300,8.73,unset
+E B+C+D,65536,-fa on -ctxcp 0 -cram 0,greedy,4383,59.9,300,8.68,unset
+F E + ubatch,65536,-fa on -ctxcp 0 -cram 0 -ub 256 -b 512,greedy,4383,58.1,300,8.70,unset
+G E + recommended sampling (CPU),65536,-fa on -ctxcp 0 -cram 0,temp0.7 top_p0.8 top_k20 presence1.5,4383,59.9,300,8.14,unset
+H E + recommended sampling (GPU),65536,-fa on -ctxcp 0 -cram 0 -bs,temp0.7 top_p0.8 top_k20 presence1.5,4383,59.9,300,8.14,unset
+a baseline,8192,-fa on,greedy,4383,59.3,300,8.76,unset
+b fit off,8192,-fa on --fit off,greedy,4383,59.3,300,8.77,unset
+c no op offload,8192,-fa on --no-op-offload,greedy,4383,59.3,300,8.76,unset
+d threads,8192,-fa on -t 4 -tb 4 --poll 0,greedy,4383,59.4,300,8.76,unset
+e no host,8192,-fa on --no-host,greedy,4383,59.3,300,8.78,unset
+f b+c+e,8192,-fa on --fit off --no-host --no-op-offload,greedy,4383,59.3,300,8.79,unset
