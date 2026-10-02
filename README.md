@@ -5,14 +5,25 @@ GPU × LLM モデルの組み合わせごとに、**何が効いて何が効か�
 
 ## 収録
 
-| GPU | モデル | prefill 改善前 → 後 | decode 改善前 → 後 | モデル概要 | 検証に基づく得意な作業 |
-|---|---|---:|---:|---|---|
-| [gfx906-radeon-vii](gfx906-radeon-vii/) | [Qwen3.8-27B](gfx906-radeon-vii/qwen3.8-27b/) | 98.96 → **173.19 t/s** (+75%) | 13.27 → **26.26 t/s** (+98%) | `qwen35` 27B。65 層中 49 層が線形アテンション、16 層が full attention。MTP ヘッドつき | **tool calling 型エージェント**。自作評価 47/48。長文でも 8k → 45k で decode 低下は約 12% |
-| | [Qwen3-8B](gfx906-radeon-vii/qwen3-8b/) | 360.93 → **742.80 t/s**（誤設定 → default） | 69.52 → **78.63 t/s**（誤設定 → default） | `qwen3` 8B。36 層すべて full attention。27B の混合アテンションとの比較対象 | 下流タスク適性は未評価。**比較ベンチと設定回帰の検出**に使用 |
-| | [K2-Horizon-7B](gfx906-radeon-vii/k2-horizon-7b/) | 未測定 → **628.5 t/s**（Q4_K_M、単発） | 未測定 → **76.6 t/s**（Q4_K_M、単発） | 7B 級。Q4_K_M / Q5_K_M / Q6_K / Q8_0 の速度記録を収録 | **未判定**。現状は単発速度測定のみで、品質・エージェント適性は未検証 |
-| | [MiMo-V2.6-Distill-Qwen-9B](gfx906-radeon-vii/mimo-v2.6-distill-qwen-9b/) | 未測定 → **743.66 t/s**（Q8_0、単発最大） | 未測定 → **74.61 t/s**（Q5_K_M、単発最大） | Qwen 系 9B 蒸留モデル。Q4_K_M〜Q8_0 の速度記録を収録 | **未判定**。エージェント 2 課題の追加試験は fail / partial で、得意分野を示す根拠はまだない |
-| | [Bonsai 2 27B](gfx906-radeon-vii/bonsai-2-27b/) | 59.6 → **284 t/s** | 8.74 → **約 59 t/s**（MTP 自己投機で約 72 t/s） | Qwen3.8-27B を三値で量子化認識学習した `qwen35`。PQ2_0 は 7.21 GB | **思考オンのエージェント実行**。12 課題中 11 課題が全テスト合格。思考オフは遅く低得点 |
+| GPU | Model | Prefill & Decode (Only / MTP) | Patch |
+|---|---|---|---|
+| [gfx906-radeon-vii](gfx906-radeon-vii/) | [Qwen3.8-27B](gfx906-radeon-vii/qwen3.8-27b/) | **Only:** prefill 98.96 → **173.19 t/s** / decode 13.27 → **26.26 t/s**<br>**MTP:** — | [`gfx906-radeon-vii/patches/gcn-f16acc.patch`](gfx906-radeon-vii/patches/gcn-f16acc.patch) |
+| | [Qwen3-8B](gfx906-radeon-vii/qwen3-8b/) | **Only:** prefill 360.93 → **742.80 t/s** / decode 69.52 → **78.63 t/s**（誤設定 → default）<br>**MTP:** — | [`gfx906-radeon-vii/patches/gcn-f16acc.patch`](gfx906-radeon-vii/patches/gcn-f16acc.patch) |
+| | [K2-Horizon-7B](gfx906-radeon-vii/k2-horizon-7b/) | **Only:** prefill **628.5 t/s** / decode **76.6 t/s**（Q4_K_M、単発）<br>**MTP:** — | — |
+| | [MiMo-V2.6-Distill-Qwen-9B](gfx906-radeon-vii/mimo-v2.6-distill-qwen-9b/) | **Only:** prefill **743.66 t/s**（Q8_0、単発最大）/ decode **74.61 t/s**（Q5_K_M、単発最大）<br>**MTP:** — | — |
+| | [Bonsai 2 27B](gfx906-radeon-vii/bonsai-2-27b/) | **Only:** prefill 59.6 → **284 t/s** / decode 8.74 → **約 59 t/s**<br>**MTP:** decode **約 72 t/s**（draft 2） | [`gfx906-radeon-vii/bonsai-2-27b/patches/`](gfx906-radeon-vii/bonsai-2-27b/patches/) / [`toolcall-optional-newlines.patch`](gfx906-radeon-vii/patches/toolcall-optional-newlines.patch) |
 
+> Qwen3-8B はチューニング前後ではなく、誤った環境変数から default へ戻した回復値。
+> K2-Horizon-7B と MiMo-V2.6-Distill-Qwen-9B は対になる改善前測定がなく、表中は保存済みの単発値。
+> Bonsai 2 27B の MTP 値は decode のみ。prefill の MTP 比較値は未測定。
+
+### モデル概要・検証結果
+
+- **Qwen3.8-27B** — `qwen35` 27B。65 層中 49 層が線形アテンション、16 層が full attention、MTP ヘッドつき。OpenAI 互換 tool calling の自作評価は 47/48。8k → 45k 文脈で decode 低下は約 12%。
+- **Qwen3-8B** — `qwen3` 8B、36 層すべて full attention。27B の混合アテンションに対する比較対象として使用し、環境変数の誤設定による大幅な prefill 低下を検出した。下流タスク適性は未評価。
+- **K2-Horizon-7B** — Q4_K_M / Q5_K_M / Q6_K / Q8_0 の速度記録を収録。現状は単発速度測定が中心で、品質・エージェント適性は未検証。
+- **MiMo-V2.6-Distill-Qwen-9B** — Q4_K_M〜Q8_0 の速度記録を収録。追加したエージェント 2 課題は fail / partial で、得意分野を示す根拠はまだない。
+- **Bonsai 2 27B** — Qwen3.8-27B を三値で量子化認識学習した `qwen35`。PQ2_0 は 7.21 GB。思考オンのエージェント評価では 12 課題中 11 課題が全テスト合格し、思考オフは遅く低得点だった。
 
 ## 構成
 
