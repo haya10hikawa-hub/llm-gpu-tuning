@@ -1,0 +1,19 @@
+session,config,build,ub,kv,env,prefill_4300,decode_4300,prefill_15000,decode_15000,greedy_vs_control
+s1,control,gfx906opt@b9d9b03,512,q8_0,,164.5,27.72,151.9,26.59,same
+s1,int-dot MMQ+MMVQ +0033/0034/0035,cyber-opt1@27d4b28,512,q8_0,,204.8,29.49,190.6,27.99,diverges@2
+s1,same,cyber-opt1@27d4b28,512,q8_0,GGML_VK_DISABLE_MMVQ=1,203.6,27.69,190.7,25.55,diverges@2
+s1,same,cyber-opt1@27d4b28,512,q8_0,GGML_VK_GDN_LANES=8,205.9,30.05,191.1,28.06,diverges@2
+s1,same,cyber-opt1@27d4b28,512,q8_0,GGML_VK_FA_GCN_GQA_TILE_DISABLE=1,206.0,29.10,190.6,27.76,diverges@2
+s1,same,cyber-opt1@27d4b28,512,q8_0,GGML_VK_NO_SMALL_M_LARGE_WG=1,205.3,29.66,190.7,28.65,diverges@2
+s1,control,gfx906opt@b9d9b03,512,q8_0,,163.9,28.12,150.8,26.41,same
+s2,+GDN in-place,cyber-opt1@156a232,512,q8_0,,206.1,29.42,190.5,27.67,diverges@2
+s2,same,cyber-opt1@156a232,512,q8_0,GGML_VK_DISABLE_GDN_INPLACE=1,206.0,29.39,190.5,27.15,diverges@2
+s3,control,gfx906opt@b9d9b03,1024,q8_0,,165.5,28.00,155.0,26.17,same
+s3,+packed LUT +IQ4_XS _int tiles,cyber-opt1@81c8c13,1024,q8_0,,265.6,30.73,242.2,29.43,diverges@2
+s3,same,cyber-opt1@81c8c13,1024,q8_0,GGML_VK_IQ4XS_MMQ_K=1,218.3,31.10,203.1,29.03,diverges@2
+s3,same,cyber-opt1@81c8c13,1024,q8_0,GGML_VK_Q5K_MMQ_INT=1,277.9,30.78,251.8,29.24,diverges@2
+s4,control,gfx906opt@b9d9b03,1024,q8_0,,165.4,27.56,153.7,26.15,same
+s4,final,cyber-opt1@71f334c,1024,q8_0,,279.8,31.63,251.7,29.89,diverges@2
+s4,final,cyber-opt1@71f334c,2048,q8_0,,286.3,31.11,256.1,29.15,diverges@2
+s4,control,gfx906opt@b9d9b03,1024,q8_0,,164.7,28.03,151.5,26.19,same
+s4,final,cyber-opt1@71f334c,1024,q8_0,,279.1,30.53,250.6,29.05,diverges@2

@@ -1,0 +1,5 @@
+build,env,mean_kld,max_kld,same_top_p,note
+cyber-opt1@27d4b28,,0.000421,0.009769,98.824,decode path (-b 1 -ub 1) vs gfx906opt@b9d9b03 base
+cyber-opt1@27d4b28,GGML_VK_DISABLE_MMVQ=1,0.000188,0.030574,99.020,same
+cyber-opt1@156a232,,0.000397,0.010055,98.922,same
+cyber-opt1@71f334c,,0.000421,0.009769,98.824,same

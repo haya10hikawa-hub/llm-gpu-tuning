@@ -1,0 +1,4 @@
+build,kv,mtp_draft,ub,max_ctx,vram_free_mib,rule
+cyber-opt1@156a232,q8_0,0,512,49152,229,starts and GTT grows <=100 MiB over ctx 4096
+cyber-opt1@156a232,f16,0,512,16384,872,same
+cyber-opt1@156a232,q8_0,2,512,16384,483,same

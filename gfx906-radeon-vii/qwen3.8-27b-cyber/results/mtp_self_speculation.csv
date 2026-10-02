@@ -1,0 +1,11 @@
+session,build,draft_n_max,task,decode_tps,drafted,accepted,output_same_as_no_spec
+s2,cyber-opt1@156a232,0,new_code,31.12,,,
+s2,cyber-opt1@156a232,0,rewrite,29.93,,,
+s2,cyber-opt1@156a232,2,new_code,46.25,362,330,true
+s2,cyber-opt1@156a232,2,rewrite,47.07,346,337,true
+s2,cyber-opt1@156a232,3,new_code,48.34,423,370,false
+s2,cyber-opt1@156a232,3,rewrite,50.43,397,378,true
+s4,cyber-opt1@71f334c,0,new_code,31.76,,,
+s4,cyber-opt1@71f334c,0,rewrite,31.34,,,
+s4,cyber-opt1@71f334c,2,new_code,46.00,367,327,true
+s4,cyber-opt1@71f334c,2,rewrite,47.41,346,337,true
