@@ -5,13 +5,17 @@ GPU × LLM モデルの組み合わせごとに、**何が効いて何が効か�
 
 ## 収録
 
-| GPU | モデル | 成果 |
-|---|---|---|
-| [gfx906-radeon-vii](gfx906-radeon-vii/) | [Qwen3.8-27B](gfx906-radeon-vii/qwen3.8-27b/) | decode +98% / prefill +75%。コード変更 7 行。OpenAI 互換 API として常駐 |
-| | [Qwen3-8B](gfx906-radeon-vii/qwen3-8b/) | 比較用。環境変数の誤設定で prefill −51% を検出 |
-| | [K2-Horizon-7B](gfx906-radeon-vii/k2-horizon-7b/) | Q4_K_M 単発で prefill 628.5 / decode 76.6 tok/s。Q4〜Q8 を測定 |
-| | [MiMo-V2.6-Distill-Qwen-9B](gfx906-radeon-vii/mimo-v2.6-distill-qwen-9b/) | 単発で最大 prefill 743.66 / decode 74.61 tok/s。Q4〜Q8 を測定 |
-| | [Bonsai 2 27B](gfx906-radeon-vii/bonsai-2-27b/) | Qwen3.8-27B の三値版。環境変数とパッチで decode 8.74 → 47.24 tok/s、prefill 59.58 → 250.1 tok/s |
+| GPU | モデル | prefill 改善前 → 後 | decode 改善前 → 後 | モデル概要 | 検証に基づく得意な作業 |
+|---|---|---:|---:|---|---|
+| [gfx906-radeon-vii](gfx906-radeon-vii/) | [Qwen3.8-27B](gfx906-radeon-vii/qwen3.8-27b/) | 98.96 → **173.19 t/s** (+75%) | 13.27 → **26.26 t/s** (+98%) | `qwen35` 27B。65 層中 49 層が線形アテンション、16 層が full attention。MTP ヘッドつき | **tool calling 型エージェント**。自作評価 47/48。長文でも 8k → 45k で decode 低下は約 12% |
+| | [Qwen3-8B](gfx906-radeon-vii/qwen3-8b/) | 360.93 → **742.80 t/s**（誤設定 → default） | 69.52 → **78.63 t/s**（誤設定 → default） | `qwen3` 8B。36 層すべて full attention。27B の混合アテンションとの比較対象 | 下流タスク適性は未評価。**比較ベンチと設定回帰の検出**に使用 |
+| | [K2-Horizon-7B](gfx906-radeon-vii/k2-horizon-7b/) | 未測定 → **628.5 t/s**（Q4_K_M、単発） | 未測定 → **76.6 t/s**（Q4_K_M、単発） | 7B 級。Q4_K_M / Q5_K_M / Q6_K / Q8_0 の速度記録を収録 | **未判定**。現状は単発速度測定のみで、品質・エージェント適性は未検証 |
+| | [MiMo-V2.6-Distill-Qwen-9B](gfx906-radeon-vii/mimo-v2.6-distill-qwen-9b/) | 未測定 → **743.66 t/s**（Q8_0、単発最大） | 未測定 → **74.61 t/s**（Q5_K_M、単発最大） | Qwen 系 9B 蒸留モデル。Q4_K_M〜Q8_0 の速度記録を収録 | **未判定**。エージェント 2 課題の追加試験は fail / partial で、得意分野を示す根拠はまだない |
+| | [Bonsai 2 27B](gfx906-radeon-vii/bonsai-2-27b/) | 59.6 → **284 t/s** | 8.74 → **約 59 t/s**（MTP 自己投機で約 72 t/s） | Qwen3.8-27B を三値で量子化認識学習した `qwen35`。PQ2_0 は 7.21 GB | **思考オンのエージェント実行**。12 課題中 11 課題が全テスト合格。思考オフは遅く低得点 |
+
+> **読み方:** Qwen3-8B はチューニング前後ではなく、誤った環境変数から default へ戻した回復値。
+> K2-Horizon-7B と MiMo-V2.6-Distill-Qwen-9B は対になる改善前測定がなく、右側は保存済みの単発値であるため改善率は出していない。
+> 「得意な作業」はこのリポジトリ内の下流タスク検証で確認できた範囲だけを記載する。
 
 ## 構成
 
@@ -48,7 +52,7 @@ tools/                     GPU・モデル非依存のハーネス
 作る。`tools/` のハーネスは環境変数でパスを受けるので再利用できる。
 
 ```bash
-LLM_TUNING_ROOT=<gpu>/<model> LLAMA_BIN=<path> python3 tools/agentic_eval.py --server ...
+LLM_TUNING_ROOT=<gpu>/<model> LLLAMA_BIN=<path> python3 tools/agentic_eval.py --server ...
 ```
 
 作業前に [AGENTS.md](AGENTS.md) と対象 GPU の `AGENTS.md` を読むこと。
