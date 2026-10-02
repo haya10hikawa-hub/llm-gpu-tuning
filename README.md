@@ -5,13 +5,14 @@ GPU × LLM モデルの組み合わせごとに、**何が効いて何が効か�
 
 ## 収録
 
-| GPU | モデル | 成果 |
-|---|---|---|
-| [gfx906-radeon-vii](gfx906-radeon-vii/) | [Qwen3.8-27B](gfx906-radeon-vii/qwen3.8-27b/) | decode +98% / prefill +75%。コード変更 7 行。OpenAI 互換 API として常駐 |
-| | [Qwen3-8B](gfx906-radeon-vii/qwen3-8b/) | 比較用。環境変数の誤設定で prefill −51% を検出 |
-| | [K2-Horizon-7B](gfx906-radeon-vii/k2-horizon-7b/) | Q4_K_M 単発で prefill 628.5 / decode 76.6 tok/s。Q4〜Q8 を測定 |
-| | [MiMo-V2.6-Distill-Qwen-9B](gfx906-radeon-vii/mimo-v2.6-distill-qwen-9b/) | 単発で最大 prefill 743.66 / decode 74.61 tok/s。Q4〜Q8 を測定 |
-| | [Bonsai 2 27B](gfx906-radeon-vii/bonsai-2-27b/) | Qwen3.8-27B の三値版。環境変数とパッチで decode 8.74 → 47.24 tok/s、prefill 59.58 → 250.1 tok/s |
+| GPU | Model | Prefill & Decode (Only / MTP) | Patch |
+|---|---|---|---|
+| [gfx906-radeon-vii](gfx906-radeon-vii/) | [Qwen3.8-27B](gfx906-radeon-vii/qwen3.8-27b/) | **Only:** prefill 98.96 → **173.19 t/s** / decode 13.27 → **26.26 t/s**<br>**MTP:** — | [`gfx906-radeon-vii/patches/gcn-f16acc.patch`](gfx906-radeon-vii/patches/gcn-f16acc.patch) |
+| | [Qwen3-8B](gfx906-radeon-vii/qwen3-8b/) | **Only:** prefill 360.93 → **742.80 t/s** / decode 69.52 → **78.63 t/s**（誤設定 → default）<br>**MTP:** — | [`gfx906-radeon-vii/patches/gcn-f16acc.patch`](gfx906-radeon-vii/patches/gcn-f16acc.patch) |
+| | [K2-Horizon-7B](gfx906-radeon-vii/k2-horizon-7b/) | **Only:** prefill **628.5 t/s** / decode **76.6 t/s**（Q4_K_M、単発）<br>**MTP:** — | — |
+| | [MiMo-V2.6-Distill-Qwen-9B](gfx906-radeon-vii/mimo-v2.6-distill-qwen-9b/) | **Only:** prefill **743.66 t/s**（Q8_0、単発最大）/ decode **74.61 t/s**（Q5_K_M、単発最大）<br>**MTP:** — | — |
+| | [Bonsai 2 27B](gfx906-radeon-vii/bonsai-2-27b/) | **Only:** prefill 59.6 → **284 t/s** / decode 8.74 → **約 59 t/s**<br>**MTP:** decode **約 72 t/s**（draft 2） | [`gfx906-radeon-vii/bonsai-2-27b/patches/`](gfx906-radeon-vii/bonsai-2-27b/patches/) / [`toolcall-optional-newlines.patch`](gfx906-radeon-vii/patches/toolcall-optional-newlines.patch) |
+
 
 ## 構成
 
