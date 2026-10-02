@@ -52,7 +52,7 @@ tools/                     GPU・モデル非依存のハーネス
 作る。`tools/` のハーネスは環境変数でパスを受けるので再利用できる。
 
 ```bash
-LLM_TUNING_ROOT=<gpu>/<model> LLLAMA_BIN=<path> python3 tools/agentic_eval.py --server ...
+LLM_TUNING_ROOT=<gpu>/<model> LLAMA_BIN=<path> python3 tools/agentic_eval.py --server ...
 ```
 
 作業前に [AGENTS.md](AGENTS.md) と対象 GPU の `AGENTS.md` を読むこと。
